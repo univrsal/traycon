@@ -8,6 +8,11 @@ Minimal C library for creating system tray icons on **Linux**, **macOS**, and **
 | macOS                 | `NSStatusBar` / `NSStatusItem` (AppKit)    |
 | Windows               | `Shell_NotifyIconW` (Win32)                |
 
+Features:
+
+- Create and update tray icon from raw RGBA data
+- Callback for left clicking
+
 ## Usage
 
 `traycon` is distributed as a **single-file header** in the style of the
