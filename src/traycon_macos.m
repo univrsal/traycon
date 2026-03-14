@@ -108,13 +108,15 @@ traycon *traycon_create(const unsigned char *rgba, int width, int height,
         return NULL;
     }
     [img setTemplate:NO];
+    CGFloat thickness = [bar thickness];
+    [img setSize:NSMakeSize(thickness, thickness)];
     tray->item.button.image = img;
 
     tray->handler             = [[TrayconClickHandler alloc] init];
     tray->handler.tray_ptr    = tray;
     tray->item.button.target  = tray->handler;
     tray->item.button.action  = @selector(handleClick:);
-    tray->item.button.sendActionOn = NSEventMaskLeftMouseUp;
+    [tray->item.button sendActionOn:NSEventMaskLeftMouseUp];
 
     return tray;
 }
@@ -129,6 +131,8 @@ int traycon_update_icon(traycon *tray, const unsigned char *rgba,
     if (!img) return -1;
 
     [img setTemplate:NO];
+    CGFloat thickness = [[NSStatusBar systemStatusBar] thickness];
+    [img setSize:NSMakeSize(thickness, thickness)];
     tray->item.button.image = img;
     return 0;
 }
