@@ -164,4 +164,11 @@ void traycon_destroy(traycon *tray)
     free(tray);
 }
 
+int traycon_set_visible(traycon *tray, int visible)
+{
+    if (!tray || !tray->item) return -1;
+    tray->item.visible = visible ? YES : NO;
+    return 0;
+}
+
 #endif /* __APPLE__ */

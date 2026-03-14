@@ -12,6 +12,7 @@ Features:
 
 - Create and update tray icon from raw RGBA data
 - Callback for left clicking
+- Hide/show icon
 
 ## Usage
 
@@ -57,6 +58,9 @@ int traycon_step(traycon *tray);
 
 // Remove the tray icon and free all resources.  Passing NULL is safe.
 void traycon_destroy(traycon *tray);
+
+// Hide/show the icon
+int traycon_set_visible(traycon* tray, int visible);
 ```
 
 The icon data is raw **RGBA**, row-major, top-left origin. Recommended

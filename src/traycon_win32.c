@@ -30,6 +30,7 @@ struct traycon {
     HICON            hicon;
     traycon_click_cb cb;
     void            *userdata;
+    int              visible;   /* non-zero = shown, zero = hidden */
 };
 
 static const wchar_t CLASS_NAME[] = L"traycon_wnd";
@@ -173,6 +174,7 @@ traycon *traycon_create(const unsigned char *rgba, int width, int height,
         free(tray);
         return NULL;
     }
+    tray->visible = 1;
 
     return tray;
 }
@@ -208,10 +210,29 @@ int traycon_step(traycon *tray)
 void traycon_destroy(traycon *tray)
 {
     if (!tray) return;
-    Shell_NotifyIconW(NIM_DELETE, &tray->nid);
+    if (tray->visible)
+        Shell_NotifyIconW(NIM_DELETE, &tray->nid);
     if (tray->hicon) DestroyIcon(tray->hicon);
     if (tray->hwnd)  DestroyWindow(tray->hwnd);
     free(tray);
+}
+
+int traycon_set_visible(traycon *tray, int visible)
+{
+    if (!tray) return -1;
+    visible = visible ? 1 : 0;
+    if (tray->visible == visible) return 0;
+
+    if (visible) {
+        /* Re-add the icon */
+        tray->nid.uFlags = NIF_ICON | NIF_MESSAGE;
+        tray->nid.hIcon  = tray->hicon;
+        if (!Shell_NotifyIconW(NIM_ADD, &tray->nid)) return -1;
+    } else {
+        if (!Shell_NotifyIconW(NIM_DELETE, &tray->nid)) return -1;
+    }
+    tray->visible = visible;
+    return 0;
 }
 
 #endif /* _WIN32 */

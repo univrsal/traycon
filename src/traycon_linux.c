@@ -29,6 +29,7 @@ struct traycon {
     int              icon_w;
     int              icon_h;
     int              icon_len;    /* icon_w * icon_h * 4               */
+    int              visible;     /* non-zero = shown, zero = hidden   */
 
     char             bus_name[128];
 };
@@ -209,7 +210,7 @@ static int append_property(DBusMessageIter *iter, const char *prop,
     if      (!strcmp(prop, "Category"))            var_string(iter, "ApplicationStatus");
     else if (!strcmp(prop, "Id"))                  var_string(iter, "traycon");
     else if (!strcmp(prop, "Title"))               var_string(iter, "traycon");
-    else if (!strcmp(prop, "Status"))              var_string(iter, "Active");
+    else if (!strcmp(prop, "Status"))              var_string(iter, tray->visible ? "Active" : "Passive");
     else if (!strcmp(prop, "WindowId"))            var_uint32(iter, 0);
     else if (!strcmp(prop, "IconThemePath"))       var_string(iter, "");
     else if (!strcmp(prop, "IconName"))            var_string(iter, "");
@@ -355,6 +356,7 @@ traycon *traycon_create(const unsigned char *rgba, int width, int height,
     tray->icon_w   = width;
     tray->icon_h   = height;
     tray->icon_len = width * height * 4;
+    tray->visible  = 1;
 
     /* Connect to the session bus ------------------------------------ */
     DBusError err;
@@ -484,4 +486,27 @@ void traycon_destroy(traycon *tray)
     }
     free(tray->icon_argb);
     free(tray);
+}
+
+int traycon_set_visible(traycon *tray, int visible)
+{
+    if (!tray) return -1;
+    visible = visible ? 1 : 0;
+    if (tray->visible == visible) return 0;
+    tray->visible = visible;
+
+    /* Emit NewStatus so the tray host re-reads the Status property */
+    const char *status = visible ? "Active" : "Passive";
+    DBusMessage *sig = dbus_message_new_signal(
+        "/StatusNotifierItem",
+        "org.kde.StatusNotifierItem",
+        "NewStatus");
+    if (sig) {
+        dbus_message_append_args(sig,
+            DBUS_TYPE_STRING, &status, DBUS_TYPE_INVALID);
+        dbus_connection_send(tray->conn, sig, NULL);
+        dbus_message_unref(sig);
+        dbus_connection_flush(tray->conn);
+    }
+    return 0;
 }

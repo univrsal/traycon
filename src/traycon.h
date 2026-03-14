@@ -49,6 +49,13 @@ int traycon_step(traycon *tray);
  */
 void traycon_destroy(traycon *tray);
 
+/*
+ * Show or hide the tray icon.
+ * visible: non-zero to show, zero to hide.
+ * Returns 0 on success, -1 on failure.
+ */
+int traycon_set_visible(traycon *tray, int visible);
+
 #ifdef __cplusplus
 }
 #endif

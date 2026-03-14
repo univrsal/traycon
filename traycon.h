@@ -49,6 +49,13 @@ int traycon_step(traycon *tray);
  */
 void traycon_destroy(traycon *tray);
 
+/*
+ * Show or hide the tray icon.
+ * visible: non-zero to show, zero to hide.
+ * Returns 0 on success, -1 on failure.
+ */
+int traycon_set_visible(traycon *tray, int visible);
+
 #ifdef __cplusplus
 }
 #endif
@@ -97,6 +104,7 @@ struct traycon {
     int              icon_w;
     int              icon_h;
     int              icon_len;    /* icon_w * icon_h * 4               */
+    int              visible;     /* non-zero = shown, zero = hidden   */
 
     char             bus_name[128];
 };
@@ -277,7 +285,7 @@ static int append_property(DBusMessageIter *iter, const char *prop,
     if      (!strcmp(prop, "Category"))            var_string(iter, "ApplicationStatus");
     else if (!strcmp(prop, "Id"))                  var_string(iter, "traycon");
     else if (!strcmp(prop, "Title"))               var_string(iter, "traycon");
-    else if (!strcmp(prop, "Status"))              var_string(iter, "Active");
+    else if (!strcmp(prop, "Status"))              var_string(iter, tray->visible ? "Active" : "Passive");
     else if (!strcmp(prop, "WindowId"))            var_uint32(iter, 0);
     else if (!strcmp(prop, "IconThemePath"))       var_string(iter, "");
     else if (!strcmp(prop, "IconName"))            var_string(iter, "");
@@ -423,6 +431,7 @@ traycon *traycon_create(const unsigned char *rgba, int width, int height,
     tray->icon_w   = width;
     tray->icon_h   = height;
     tray->icon_len = width * height * 4;
+    tray->visible  = 1;
 
     /* Connect to the session bus ------------------------------------ */
     DBusError err;
@@ -553,6 +562,29 @@ void traycon_destroy(traycon *tray)
     free(tray->icon_argb);
     free(tray);
 }
+
+int traycon_set_visible(traycon *tray, int visible)
+{
+    if (!tray) return -1;
+    visible = visible ? 1 : 0;
+    if (tray->visible == visible) return 0;
+    tray->visible = visible;
+
+    /* Emit NewStatus so the tray host re-reads the Status property */
+    const char *status = visible ? "Active" : "Passive";
+    DBusMessage *sig = dbus_message_new_signal(
+        "/StatusNotifierItem",
+        "org.kde.StatusNotifierItem",
+        "NewStatus");
+    if (sig) {
+        dbus_message_append_args(sig,
+            DBUS_TYPE_STRING, &status, DBUS_TYPE_INVALID);
+        dbus_connection_send(tray->conn, sig, NULL);
+        dbus_message_unref(sig);
+        dbus_connection_flush(tray->conn);
+    }
+    return 0;
+}
 #endif /* __linux__ */
 /* ====== end traycon_linux.c ====== */
 
@@ -586,6 +618,7 @@ struct traycon {
     HICON            hicon;
     traycon_click_cb cb;
     void            *userdata;
+    int              visible;   /* non-zero = shown, zero = hidden */
 };
 
 static const wchar_t CLASS_NAME[] = L"traycon_wnd";
@@ -729,6 +762,7 @@ traycon *traycon_create(const unsigned char *rgba, int width, int height,
         free(tray);
         return NULL;
     }
+    tray->visible = 1;
 
     return tray;
 }
@@ -764,10 +798,29 @@ int traycon_step(traycon *tray)
 void traycon_destroy(traycon *tray)
 {
     if (!tray) return;
-    Shell_NotifyIconW(NIM_DELETE, &tray->nid);
+    if (tray->visible)
+        Shell_NotifyIconW(NIM_DELETE, &tray->nid);
     if (tray->hicon) DestroyIcon(tray->hicon);
     if (tray->hwnd)  DestroyWindow(tray->hwnd);
     free(tray);
+}
+
+int traycon_set_visible(traycon *tray, int visible)
+{
+    if (!tray) return -1;
+    visible = visible ? 1 : 0;
+    if (tray->visible == visible) return 0;
+
+    if (visible) {
+        /* Re-add the icon */
+        tray->nid.uFlags = NIF_ICON | NIF_MESSAGE;
+        tray->nid.hIcon  = tray->hicon;
+        if (!Shell_NotifyIconW(NIM_ADD, &tray->nid)) return -1;
+    } else {
+        if (!Shell_NotifyIconW(NIM_DELETE, &tray->nid)) return -1;
+    }
+    tray->visible = visible;
+    return 0;
 }
 
 #endif /* _WIN32 */
@@ -881,13 +934,15 @@ traycon *traycon_create(const unsigned char *rgba, int width, int height,
         return NULL;
     }
     [img setTemplate:NO];
+    CGFloat thickness = [bar thickness];
+    [img setSize:NSMakeSize(thickness, thickness)];
     tray->item.button.image = img;
 
     tray->handler             = [[TrayconClickHandler alloc] init];
     tray->handler.tray_ptr    = tray;
     tray->item.button.target  = tray->handler;
     tray->item.button.action  = @selector(handleClick:);
-    tray->item.button.sendActionOn = NSEventMaskLeftMouseUp;
+    [tray->item.button sendActionOn:NSEventMaskLeftMouseUp];
 
     return tray;
 }
@@ -902,6 +957,8 @@ int traycon_update_icon(traycon *tray, const unsigned char *rgba,
     if (!img) return -1;
 
     [img setTemplate:NO];
+    CGFloat thickness = [[NSStatusBar systemStatusBar] thickness];
+    [img setSize:NSMakeSize(thickness, thickness)];
     tray->item.button.image = img;
     return 0;
 }
@@ -931,6 +988,13 @@ void traycon_destroy(traycon *tray)
     tray->item    = nil;
     tray->handler = nil;
     free(tray);
+}
+
+int traycon_set_visible(traycon *tray, int visible)
+{
+    if (!tray || !tray->item) return -1;
+    tray->item.visible = visible ? YES : NO;
+    return 0;
 }
 
 #endif /* __APPLE__ */
