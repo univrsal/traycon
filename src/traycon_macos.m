@@ -171,4 +171,6 @@ int traycon_set_visible(traycon *tray, int visible)
     return 0;
 }
 
+void traycon_set_preferred_backend(int backend) { (void)backend; }
+
 #endif /* __APPLE__ */

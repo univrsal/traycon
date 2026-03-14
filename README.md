@@ -5,8 +5,17 @@ Minimal C library for creating system tray icons on **Linux**, **macOS**, and **
 | Platform              | Backend                                    |
 | --------------------- | ------------------------------------------ |
 | Linux (Wayland / KDE) | StatusNotifierItem via D-Bus (`libdbus-1`) |
+| Linux (X11)           | XEmbed system tray protocol (`libX11`)     |
 | macOS                 | `NSStatusBar` / `NSStatusItem` (AppKit)    |
 | Windows               | `Shell_NotifyIconW` (Win32)                |
+
+On Linux both backends are compiled in by default. At runtime the library
+**auto-detects** the best one: it tries the D-Bus/SNI backend first (works
+on KDE Plasma, GNOME with AppIndicator, etc.) and falls back to the X11
+system tray if no StatusNotifierWatcher is available.
+
+You can override this with `traycon_set_preferred_backend()` or at compile
+time with `-DTRAYCON_NO_SNI` / `-DTRAYCON_NO_X11`.
 
 Features:
 
@@ -61,6 +70,13 @@ void traycon_destroy(traycon *tray);
 
 // Hide/show the icon
 int traycon_set_visible(traycon* tray, int visible);
+
+// Linux only: choose backend before traycon_create().
+// TRAYCON_BACKEND_AUTO (0) – try SNI, fall back to X11 (default)
+// TRAYCON_BACKEND_SNI  (1) – D-Bus StatusNotifierItem only
+// TRAYCON_BACKEND_X11  (2) – XEmbed system tray only
+// No-op on macOS / Windows.
+void traycon_set_preferred_backend(int backend);
 ```
 
 The icon data is raw **RGBA**, row-major, top-left origin. Recommended
@@ -133,8 +149,15 @@ make clean    # removes example and traycon.h
 
 Platform dependencies:
 
-| Platform | Requirement                  |
-| -------- | ---------------------------- |
-| Linux    | `libdbus-1` (`pkg-config`)   |
-| macOS    | `-framework Cocoa` (default) |
-| Windows  | `shell32`, `user32`, `gdi32` |
+| Platform | Requirement                                |
+| -------- | ------------------------------------------ |
+| Linux    | `libdbus-1` and/or `libX11` (`pkg-config`) |
+| macOS    | `-framework Cocoa` (default)               |
+| Windows  | `shell32`, `user32`, `gdi32`               |
+
+To compile with only one Linux backend, pass a define:
+
+```sh
+make EXTRA_CFLAGS=-DTRAYCON_NO_SNI   # X11 only, no libdbus dependency
+make EXTRA_CFLAGS=-DTRAYCON_NO_X11   # SNI only, no libX11 dependency
+```

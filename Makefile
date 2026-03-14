@@ -5,10 +5,16 @@ CC      ?= cc
 CFLAGS  ?= -Wall -Wextra -O2 -std=c99
 
 ifeq ($(UNAME),Linux)
-  DBUS_CFLAGS := $(shell pkg-config --cflags dbus-1)
-  DBUS_LIBS   := $(shell pkg-config --libs   dbus-1)
-  PLATFORM_CFLAGS = $(DBUS_CFLAGS)
-  PLATFORM_LIBS   = $(DBUS_LIBS)
+  DBUS_CFLAGS := $(shell pkg-config --cflags dbus-1 2>/dev/null)
+  DBUS_LIBS   := $(shell pkg-config --libs   dbus-1 2>/dev/null)
+  X11_CFLAGS  := $(shell pkg-config --cflags x11 2>/dev/null)
+  X11_LIBS    := $(shell pkg-config --libs   x11 2>/dev/null)
+  PLATFORM_CFLAGS = $(DBUS_CFLAGS) $(X11_CFLAGS)
+  PLATFORM_LIBS   = $(DBUS_LIBS) $(X11_LIBS)
+  # To disable a backend at compile time:
+  #   make EXTRA_CFLAGS=-DTRAYCON_NO_SNI   (X11 only, no libdbus dependency)
+  #   make EXTRA_CFLAGS=-DTRAYCON_NO_X11   (SNI only, no libX11 dependency)
+  PLATFORM_CFLAGS += $(EXTRA_CFLAGS)
 else ifeq ($(UNAME),Darwin)
   # Compile as Objective-C so the AppKit implementation in the bundled
   # header is accepted by the compiler.

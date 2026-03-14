@@ -15,6 +15,21 @@ typedef struct traycon traycon;
 typedef void (*traycon_click_cb)(traycon *tray, void *userdata);
 
 /*
+ * Linux backend selection (no-op on macOS / Windows).
+ *
+ * TRAYCON_BACKEND_AUTO – try SNI (D-Bus), fall back to X11  (default)
+ * TRAYCON_BACKEND_SNI  – StatusNotifierItem via D-Bus (Wayland / KDE)
+ * TRAYCON_BACKEND_X11  – XEmbed system tray protocol  (X11)
+ *
+ * Call traycon_set_preferred_backend() before traycon_create().
+ */
+#define TRAYCON_BACKEND_AUTO  0
+#define TRAYCON_BACKEND_SNI   1
+#define TRAYCON_BACKEND_X11   2
+
+void traycon_set_preferred_backend(int backend);
+
+/*
  * Create a tray icon from raw RGBA pixel data.
  *
  * rgba     - pointer to width * height * 4 bytes (R, G, B, A per pixel,
@@ -79,44 +94,120 @@ int traycon_set_visible(traycon *tray, int visible);
 /*
  * traycon – Linux implementation
  *
- * Implements the StatusNotifierItem D-Bus protocol used by KDE Plasma
- * (and other DEs with an SNI-compatible system tray) to display a tray
- * icon and receive click events.
+ * Supports two backends:
+ *   1. SNI  – StatusNotifierItem via D-Bus (Wayland / KDE / modern DEs)
+ *   2. X11  – XEmbed system tray protocol  (X11 / traditional DEs)
  *
- * Depends on libdbus-1.
+ * By default auto-detects: tries SNI first, falls back to X11.
+ * Override with traycon_set_preferred_backend() or compile-time defines
+ * TRAYCON_NO_SNI / TRAYCON_NO_X11.
+ *
+ * Dependencies:
+ *   SNI  – libdbus-1  (pkg-config dbus-1)
+ *   X11  – libX11     (pkg-config x11)
  */
-#include <dbus/dbus.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#ifndef TRAYCON_NO_SNI
+#include <dbus/dbus.h>
+#endif
+
+#ifndef TRAYCON_NO_X11
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/Xatom.h>
+#endif
+
 /* ------------------------------------------------------------------ */
-/*  Internal data                                                      */
+/*  Backend preference                                                 */
+/* ------------------------------------------------------------------ */
+
+static int traycon__preferred_backend = 0; /* TRAYCON_BACKEND_AUTO */
+
+void traycon_set_preferred_backend(int backend)
+{
+    traycon__preferred_backend = backend;
+}
+
+/* ------------------------------------------------------------------ */
+/*  struct traycon                                                     */
 /* ------------------------------------------------------------------ */
 
 struct traycon {
-    DBusConnection  *conn;
+    /* vtable -------------------------------------------------------- */
+    int  (*fn_update_icon)(traycon *, const unsigned char *, int, int);
+    int  (*fn_step)(traycon *);
+    void (*fn_destroy)(traycon *);
+    int  (*fn_set_visible)(traycon *, int);
+
+    /* common -------------------------------------------------------- */
     traycon_click_cb cb;
     void            *userdata;
+    int              visible;
 
-    unsigned char   *icon_argb;   /* ARGB32 network-byte-order pixels  */
-    int              icon_w;
-    int              icon_h;
-    int              icon_len;    /* icon_w * icon_h * 4               */
-    int              visible;     /* non-zero = shown, zero = hidden   */
+    /* backend-specific (only one active at a time) ------------------ */
+    union {
+#ifndef TRAYCON_NO_SNI
+        struct {
+            DBusConnection  *conn;
+            unsigned char   *icon_argb;   /* ARGB32 network-byte-order */
+            int              icon_w;
+            int              icon_h;
+            int              icon_len;    /* icon_w * icon_h * 4       */
+            char             bus_name[128];
+        } sni;
+#endif
+#ifndef TRAYCON_NO_X11
+        struct {
+            Display         *dpy;
+            Window           win;
+            GC               gc;
+            Visual          *visual;
+            Colormap         cmap;
+            int              depth;
+            int              screen;
+            int              own_cmap;    /* did we create the cmap?   */
 
-    char             bus_name[128];
+            unsigned char   *icon_rgba;   /* copy of original RGBA     */
+            int              icon_w;
+            int              icon_h;
+
+            XImage          *ximg;        /* converted for blitting    */
+            int              win_w;
+            int              win_h;
+
+            /* cached atoms */
+            Atom             xa_tray_sel;
+            Atom             xa_tray_opcode;
+            Atom             xa_tray_visual;
+            Atom             xa_xembed_info;
+            Atom             xa_net_wm_icon;
+            Atom             xa_manager;
+        } x11;
+#endif
+        char _pad; /* ensure the union is never empty */
+    };
 };
 
-static int traycon_id_counter = 0;
+/* ================================================================== */
+/*                                                                      */
+/*  SNI BACKEND                                                         */
+/*                                                                      */
+/* ================================================================== */
+
+#ifndef TRAYCON_NO_SNI
+
+static int sni_id_counter = 0;
 
 /* ------------------------------------------------------------------ */
 /*  RGBA → ARGB-network-byte-order conversion                         */
 /* ------------------------------------------------------------------ */
 
-static unsigned char *rgba_to_argb_nbo(const unsigned char *rgba,
-                                       int w, int h)
+static unsigned char *sni_rgba_to_argb_nbo(const unsigned char *rgba,
+                                           int w, int h)
 {
     int n = w * h;
     unsigned char *out = (unsigned char *)malloc((size_t)n * 4);
@@ -134,7 +225,7 @@ static unsigned char *rgba_to_argb_nbo(const unsigned char *rgba,
 /*  Introspection XML                                                  */
 /* ------------------------------------------------------------------ */
 
-static const char INTROSPECT_XML[] =
+static const char SNI_INTROSPECT_XML[] =
     "<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object "
     "Introspection 1.0//EN\"\n"
     "  \"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">\n"
@@ -200,7 +291,7 @@ static const char INTROSPECT_XML[] =
 /*  D-Bus variant helpers                                              */
 /* ------------------------------------------------------------------ */
 
-static void var_string(DBusMessageIter *parent, const char *val)
+static void sni_var_string(DBusMessageIter *parent, const char *val)
 {
     DBusMessageIter v;
     dbus_message_iter_open_container(parent, DBUS_TYPE_VARIANT, "s", &v);
@@ -208,7 +299,7 @@ static void var_string(DBusMessageIter *parent, const char *val)
     dbus_message_iter_close_container(parent, &v);
 }
 
-static void var_uint32(DBusMessageIter *parent, dbus_uint32_t val)
+static void sni_var_uint32(DBusMessageIter *parent, dbus_uint32_t val)
 {
     DBusMessageIter v;
     dbus_message_iter_open_container(parent, DBUS_TYPE_VARIANT, "u", &v);
@@ -216,7 +307,7 @@ static void var_uint32(DBusMessageIter *parent, dbus_uint32_t val)
     dbus_message_iter_close_container(parent, &v);
 }
 
-static void var_bool(DBusMessageIter *parent, dbus_bool_t val)
+static void sni_var_bool(DBusMessageIter *parent, dbus_bool_t val)
 {
     DBusMessageIter v;
     dbus_message_iter_open_container(parent, DBUS_TYPE_VARIANT, "b", &v);
@@ -224,7 +315,7 @@ static void var_bool(DBusMessageIter *parent, dbus_bool_t val)
     dbus_message_iter_close_container(parent, &v);
 }
 
-static void var_objectpath(DBusMessageIter *parent, const char *val)
+static void sni_var_objectpath(DBusMessageIter *parent, const char *val)
 {
     DBusMessageIter v;
     dbus_message_iter_open_container(parent, DBUS_TYPE_VARIANT, "o", &v);
@@ -233,8 +324,8 @@ static void var_objectpath(DBusMessageIter *parent, const char *val)
 }
 
 /* Write variant a(iiay).  If data is NULL an empty array is written. */
-static void var_icon_pixmap(DBusMessageIter *parent,
-                            const unsigned char *argb, int w, int h)
+static void sni_var_icon_pixmap(DBusMessageIter *parent,
+                                const unsigned char *argb, int w, int h)
 {
     DBusMessageIter v, arr;
     dbus_message_iter_open_container(parent, DBUS_TYPE_VARIANT,
@@ -257,7 +348,7 @@ static void var_icon_pixmap(DBusMessageIter *parent,
 }
 
 /* Write variant (sa(iiay)ss) — empty tooltip. */
-static void var_tooltip(DBusMessageIter *parent)
+static void sni_var_tooltip(DBusMessageIter *parent)
 {
     DBusMessageIter v, st, arr;
     const char *empty = "";
@@ -277,34 +368,32 @@ static void var_tooltip(DBusMessageIter *parent)
 /*  Property dispatch                                                  */
 /* ------------------------------------------------------------------ */
 
-/* Append a single property as a variant to *iter.  Returns 0 on
-   success, -1 if the property is unknown.                            */
-static int append_property(DBusMessageIter *iter, const char *prop,
-                           traycon *tray)
+static int sni_append_property(DBusMessageIter *iter, const char *prop,
+                               traycon *tray)
 {
-    if      (!strcmp(prop, "Category"))            var_string(iter, "ApplicationStatus");
-    else if (!strcmp(prop, "Id"))                  var_string(iter, "traycon");
-    else if (!strcmp(prop, "Title"))               var_string(iter, "traycon");
-    else if (!strcmp(prop, "Status"))              var_string(iter, tray->visible ? "Active" : "Passive");
-    else if (!strcmp(prop, "WindowId"))            var_uint32(iter, 0);
-    else if (!strcmp(prop, "IconThemePath"))       var_string(iter, "");
-    else if (!strcmp(prop, "IconName"))            var_string(iter, "");
-    else if (!strcmp(prop, "IconPixmap"))          var_icon_pixmap(iter, tray->icon_argb,
-                                                                   tray->icon_w,
-                                                                   tray->icon_h);
-    else if (!strcmp(prop, "OverlayIconName"))     var_string(iter, "");
-    else if (!strcmp(prop, "OverlayIconPixmap"))   var_icon_pixmap(iter, NULL, 0, 0);
-    else if (!strcmp(prop, "AttentionIconName"))   var_string(iter, "");
-    else if (!strcmp(prop, "AttentionIconPixmap")) var_icon_pixmap(iter, NULL, 0, 0);
-    else if (!strcmp(prop, "AttentionMovieName"))  var_string(iter, "");
-    else if (!strcmp(prop, "ToolTip"))             var_tooltip(iter);
-    else if (!strcmp(prop, "ItemIsMenu"))          var_bool(iter, FALSE);
-    else if (!strcmp(prop, "Menu"))                var_objectpath(iter, "/NO_DBUSMENU");
+    if      (!strcmp(prop, "Category"))            sni_var_string(iter, "ApplicationStatus");
+    else if (!strcmp(prop, "Id"))                  sni_var_string(iter, "traycon");
+    else if (!strcmp(prop, "Title"))               sni_var_string(iter, "traycon");
+    else if (!strcmp(prop, "Status"))              sni_var_string(iter, tray->visible ? "Active" : "Passive");
+    else if (!strcmp(prop, "WindowId"))            sni_var_uint32(iter, 0);
+    else if (!strcmp(prop, "IconThemePath"))       sni_var_string(iter, "");
+    else if (!strcmp(prop, "IconName"))            sni_var_string(iter, "");
+    else if (!strcmp(prop, "IconPixmap"))          sni_var_icon_pixmap(iter, tray->sni.icon_argb,
+                                                                       tray->sni.icon_w,
+                                                                       tray->sni.icon_h);
+    else if (!strcmp(prop, "OverlayIconName"))     sni_var_string(iter, "");
+    else if (!strcmp(prop, "OverlayIconPixmap"))   sni_var_icon_pixmap(iter, NULL, 0, 0);
+    else if (!strcmp(prop, "AttentionIconName"))   sni_var_string(iter, "");
+    else if (!strcmp(prop, "AttentionIconPixmap")) sni_var_icon_pixmap(iter, NULL, 0, 0);
+    else if (!strcmp(prop, "AttentionMovieName"))  sni_var_string(iter, "");
+    else if (!strcmp(prop, "ToolTip"))             sni_var_tooltip(iter);
+    else if (!strcmp(prop, "ItemIsMenu"))          sni_var_bool(iter, FALSE);
+    else if (!strcmp(prop, "Menu"))                sni_var_objectpath(iter, "/NO_DBUSMENU");
     else return -1;
     return 0;
 }
 
-static const char *ALL_PROPS[] = {
+static const char *SNI_ALL_PROPS[] = {
     "Category", "Id", "Title", "Status", "WindowId",
     "IconThemePath", "IconName", "IconPixmap",
     "OverlayIconName", "OverlayIconPixmap",
@@ -318,7 +407,7 @@ static const char *ALL_PROPS[] = {
 /* ------------------------------------------------------------------ */
 
 static DBusHandlerResult
-handle_message(DBusConnection *conn, DBusMessage *msg, void *data)
+sni_handle_message(DBusConnection *conn, DBusMessage *msg, void *data)
 {
     traycon *tray = (traycon *)data;
 
@@ -326,7 +415,7 @@ handle_message(DBusConnection *conn, DBusMessage *msg, void *data)
     if (dbus_message_is_method_call(msg,
             "org.freedesktop.DBus.Introspectable", "Introspect")) {
         DBusMessage *reply = dbus_message_new_method_return(msg);
-        const char *xml = INTROSPECT_XML;
+        const char *xml = SNI_INTROSPECT_XML;
         dbus_message_append_args(reply,
             DBUS_TYPE_STRING, &xml, DBUS_TYPE_INVALID);
         dbus_connection_send(conn, reply, NULL);
@@ -347,7 +436,7 @@ handle_message(DBusConnection *conn, DBusMessage *msg, void *data)
         DBusMessage *reply = dbus_message_new_method_return(msg);
         DBusMessageIter iter;
         dbus_message_iter_init_append(reply, &iter);
-        if (append_property(&iter, prop, tray) < 0) {
+        if (sni_append_property(&iter, prop, tray) < 0) {
             dbus_message_unref(reply);
             reply = dbus_message_new_error_printf(msg,
                 DBUS_ERROR_UNKNOWN_PROPERTY,
@@ -366,13 +455,13 @@ handle_message(DBusConnection *conn, DBusMessage *msg, void *data)
         dbus_message_iter_init_append(reply, &iter);
         dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY,
                                          "{sv}", &dict);
-        for (int i = 0; ALL_PROPS[i]; i++) {
+        for (int i = 0; SNI_ALL_PROPS[i]; i++) {
             DBusMessageIter entry;
             dbus_message_iter_open_container(&dict,
                 DBUS_TYPE_DICT_ENTRY, NULL, &entry);
             dbus_message_iter_append_basic(&entry,
-                DBUS_TYPE_STRING, &ALL_PROPS[i]);
-            append_property(&entry, ALL_PROPS[i], tray);
+                DBUS_TYPE_STRING, &SNI_ALL_PROPS[i]);
+            sni_append_property(&entry, SNI_ALL_PROPS[i], tray);
             dbus_message_iter_close_container(&dict, &entry);
         }
         dbus_message_iter_close_container(&iter, &dict);
@@ -410,54 +499,63 @@ handle_message(DBusConnection *conn, DBusMessage *msg, void *data)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Public API                                                         */
+/*  SNI backend functions                                              */
 /* ------------------------------------------------------------------ */
 
-traycon *traycon_create(const unsigned char *rgba, int width, int height,
-                        traycon_click_cb cb, void *userdata)
-{
-    if (!rgba || width <= 0 || height <= 0)
-        return NULL;
+static int  sni_update_icon(traycon *tray, const unsigned char *rgba,
+                            int width, int height);
+static int  sni_step(traycon *tray);
+static void sni_destroy(traycon *tray);
+static int  sni_set_visible(traycon *tray, int visible);
 
+static traycon *sni_try_create(const unsigned char *rgba, int width,
+                               int height, traycon_click_cb cb,
+                               void *userdata)
+{
     traycon *tray = (traycon *)calloc(1, sizeof *tray);
     if (!tray) return NULL;
 
-    tray->cb       = cb;
-    tray->userdata = userdata;
+    tray->fn_update_icon = sni_update_icon;
+    tray->fn_step        = sni_step;
+    tray->fn_destroy     = sni_destroy;
+    tray->fn_set_visible = sni_set_visible;
+    tray->cb             = cb;
+    tray->userdata       = userdata;
+    tray->visible        = 1;
 
     /* Convert icon -------------------------------------------------- */
-    tray->icon_argb = rgba_to_argb_nbo(rgba, width, height);
-    if (!tray->icon_argb) { free(tray); return NULL; }
-    tray->icon_w   = width;
-    tray->icon_h   = height;
-    tray->icon_len = width * height * 4;
-    tray->visible  = 1;
+    tray->sni.icon_argb = sni_rgba_to_argb_nbo(rgba, width, height);
+    if (!tray->sni.icon_argb) { free(tray); return NULL; }
+    tray->sni.icon_w   = width;
+    tray->sni.icon_h   = height;
+    tray->sni.icon_len = width * height * 4;
 
     /* Connect to the session bus ------------------------------------ */
     DBusError err;
     dbus_error_init(&err);
-    tray->conn = dbus_bus_get(DBUS_BUS_SESSION, &err);
+    tray->sni.conn = dbus_bus_get(DBUS_BUS_SESSION, &err);
     if (dbus_error_is_set(&err)) {
         fprintf(stderr, "traycon: D-Bus connection failed: %s\n", err.message);
         dbus_error_free(&err);
-        free(tray->icon_argb);
+        free(tray->sni.icon_argb);
         free(tray);
         return NULL;
     }
 
     /* Request a well-known name ------------------------------------- */
-    int id = ++traycon_id_counter;
-    snprintf(tray->bus_name, sizeof tray->bus_name,
+    int id = ++sni_id_counter;
+    snprintf(tray->sni.bus_name, sizeof tray->sni.bus_name,
              "org.kde.StatusNotifierItem-%d-%d", (int)getpid(), id);
 
-    int ret = dbus_bus_request_name(tray->conn, tray->bus_name,
+    int ret = dbus_bus_request_name(tray->sni.conn, tray->sni.bus_name,
                                     DBUS_NAME_FLAG_DO_NOT_QUEUE, &err);
-    if (dbus_error_is_set(&err) || ret != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER) {
+    if (dbus_error_is_set(&err) ||
+        ret != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER) {
         fprintf(stderr, "traycon: could not acquire bus name %s: %s\n",
-                tray->bus_name,
+                tray->sni.bus_name,
                 dbus_error_is_set(&err) ? err.message : "name taken");
         dbus_error_free(&err);
-        free(tray->icon_argb);
+        free(tray->sni.icon_argb);
         free(tray);
         return NULL;
     }
@@ -465,12 +563,12 @@ traycon *traycon_create(const unsigned char *rgba, int width, int height,
     /* Register object path ------------------------------------------ */
     static const DBusObjectPathVTable vtable = {
         .unregister_function = NULL,
-        .message_function    = handle_message,
+        .message_function    = sni_handle_message,
     };
-    if (!dbus_connection_register_object_path(tray->conn,
+    if (!dbus_connection_register_object_path(tray->sni.conn,
             "/StatusNotifierItem", &vtable, tray)) {
         fprintf(stderr, "traycon: failed to register object path\n");
-        free(tray->icon_argb);
+        free(tray->sni.icon_argb);
         free(tray);
         return NULL;
     }
@@ -481,39 +579,47 @@ traycon *traycon_create(const unsigned char *rgba, int width, int height,
         "/StatusNotifierWatcher",
         "org.kde.StatusNotifierWatcher",
         "RegisterStatusNotifierItem");
-    const char *svc = tray->bus_name;
+    const char *svc = tray->sni.bus_name;
     dbus_message_append_args(reg,
         DBUS_TYPE_STRING, &svc, DBUS_TYPE_INVALID);
 
     DBusMessage *reply = dbus_connection_send_with_reply_and_block(
-        tray->conn, reg, 5000, &err);
+        tray->sni.conn, reg, 5000, &err);
     dbus_message_unref(reg);
 
     if (dbus_error_is_set(&err)) {
         fprintf(stderr, "traycon: watcher registration failed: %s\n",
                 err.message);
         dbus_error_free(&err);
-        /* Non-fatal: the icon may still appear if a host is listening. */
+        /* Treat as fatal for auto-detect – caller can try X11 next. */
+        dbus_connection_unregister_object_path(tray->sni.conn,
+                                               "/StatusNotifierItem");
+        DBusError rel_err;
+        dbus_error_init(&rel_err);
+        dbus_bus_release_name(tray->sni.conn, tray->sni.bus_name, &rel_err);
+        dbus_error_free(&rel_err);
+        dbus_connection_flush(tray->sni.conn);
+        dbus_connection_unref(tray->sni.conn);
+        free(tray->sni.icon_argb);
+        free(tray);
+        return NULL;
     }
     if (reply) dbus_message_unref(reply);
 
     return tray;
 }
 
-int traycon_update_icon(traycon *tray, const unsigned char *rgba,
-                        int width, int height)
+static int sni_update_icon(traycon *tray, const unsigned char *rgba,
+                           int width, int height)
 {
-    if (!tray || !rgba || width <= 0 || height <= 0)
-        return -1;
-
-    unsigned char *new_argb = rgba_to_argb_nbo(rgba, width, height);
+    unsigned char *new_argb = sni_rgba_to_argb_nbo(rgba, width, height);
     if (!new_argb) return -1;
 
-    free(tray->icon_argb);
-    tray->icon_argb = new_argb;
-    tray->icon_w    = width;
-    tray->icon_h    = height;
-    tray->icon_len  = width * height * 4;
+    free(tray->sni.icon_argb);
+    tray->sni.icon_argb = new_argb;
+    tray->sni.icon_w    = width;
+    tray->sni.icon_h    = height;
+    tray->sni.icon_len  = width * height * 4;
 
     /* Tell the tray host to re-read the icon */
     DBusMessage *sig = dbus_message_new_signal(
@@ -521,56 +627,47 @@ int traycon_update_icon(traycon *tray, const unsigned char *rgba,
         "org.kde.StatusNotifierItem",
         "NewIcon");
     if (sig) {
-        dbus_connection_send(tray->conn, sig, NULL);
+        dbus_connection_send(tray->sni.conn, sig, NULL);
         dbus_message_unref(sig);
-        dbus_connection_flush(tray->conn);
+        dbus_connection_flush(tray->sni.conn);
     }
     return 0;
 }
 
-int traycon_step(traycon *tray)
+static int sni_step(traycon *tray)
 {
-    if (!tray || !tray->conn) return -1;
+    if (!tray->sni.conn) return -1;
 
     /* Non-blocking read/write */
-    if (!dbus_connection_read_write(tray->conn, 0))
+    if (!dbus_connection_read_write(tray->sni.conn, 0))
         return -1;                    /* disconnected */
 
-    /* Dispatch all queued incoming messages */
-    while (dbus_connection_dispatch(tray->conn) ==
+    while (dbus_connection_dispatch(tray->sni.conn) ==
            DBUS_DISPATCH_DATA_REMAINS)
         ;
 
     return 0;
 }
 
-void traycon_destroy(traycon *tray)
+static void sni_destroy(traycon *tray)
 {
-    if (!tray) return;
-
-    if (tray->conn) {
-        dbus_connection_unregister_object_path(tray->conn,
+    if (tray->sni.conn) {
+        dbus_connection_unregister_object_path(tray->sni.conn,
                                                "/StatusNotifierItem");
-        /* Release bus name – the tray host will notice the name vanished. */
         DBusError err;
         dbus_error_init(&err);
-        dbus_bus_release_name(tray->conn, tray->bus_name, &err);
+        dbus_bus_release_name(tray->sni.conn, tray->sni.bus_name, &err);
         dbus_error_free(&err);
-        dbus_connection_flush(tray->conn);
-        dbus_connection_unref(tray->conn);
+        dbus_connection_flush(tray->sni.conn);
+        dbus_connection_unref(tray->sni.conn);
     }
-    free(tray->icon_argb);
-    free(tray);
+    free(tray->sni.icon_argb);
 }
 
-int traycon_set_visible(traycon *tray, int visible)
+static int sni_set_visible(traycon *tray, int visible)
 {
-    if (!tray) return -1;
-    visible = visible ? 1 : 0;
-    if (tray->visible == visible) return 0;
     tray->visible = visible;
 
-    /* Emit NewStatus so the tray host re-reads the Status property */
     const char *status = visible ? "Active" : "Passive";
     DBusMessage *sig = dbus_message_new_signal(
         "/StatusNotifierItem",
@@ -579,11 +676,528 @@ int traycon_set_visible(traycon *tray, int visible)
     if (sig) {
         dbus_message_append_args(sig,
             DBUS_TYPE_STRING, &status, DBUS_TYPE_INVALID);
-        dbus_connection_send(tray->conn, sig, NULL);
+        dbus_connection_send(tray->sni.conn, sig, NULL);
         dbus_message_unref(sig);
-        dbus_connection_flush(tray->conn);
+        dbus_connection_flush(tray->sni.conn);
     }
     return 0;
+}
+
+#endif /* !TRAYCON_NO_SNI */
+
+/* ================================================================== */
+/*                                                                      */
+/*  X11 BACKEND (XEmbed system tray protocol)                           */
+/*                                                                      */
+/* ================================================================== */
+
+#ifndef TRAYCON_NO_X11
+
+#define X11_SYSTEM_TRAY_REQUEST_DOCK    0
+#define X11_SYSTEM_TRAY_BEGIN_MESSAGE   1
+#define X11_SYSTEM_TRAY_CANCEL_MESSAGE  2
+#define X11_XEMBED_MAPPED              (1 << 0)
+
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+static int x11_mask_shift(unsigned long mask)
+{
+    int s = 0;
+    if (!mask) return 0;
+    while (!(mask & 1)) { mask >>= 1; s++; }
+    return s;
+}
+
+/*
+ * Build an XImage of size (dw × dh) from RGBA source of size (sw × sh)
+ * using nearest-neighbour scaling.  Handles both depth 24 and 32.
+ */
+static XImage *x11_make_ximage(Display *dpy, Visual *vis, int depth,
+                                const unsigned char *rgba,
+                                int sw, int sh, int dw, int dh)
+{
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
+        return NULL;
+
+    int bpp = 4; /* works for depth >= 24 */
+    char *pixels = (char *)calloc((size_t)dw * dh, bpp);
+    if (!pixels) return NULL;
+
+    XImage *img = XCreateImage(dpy, vis, depth, ZPixmap, 0,
+                                pixels, dw, dh, 32, dw * bpp);
+    if (!img) { free(pixels); return NULL; }
+
+    int rs = x11_mask_shift(vis->red_mask);
+    int gs = x11_mask_shift(vis->green_mask);
+    int bs = x11_mask_shift(vis->blue_mask);
+
+    for (int y = 0; y < dh; y++) {
+        int sy = y * sh / dh;
+        for (int x = 0; x < dw; x++) {
+            int sx = x * sw / dw;
+            int i  = (sy * sw + sx) * 4;
+
+            unsigned r = rgba[i + 0];
+            unsigned g = rgba[i + 1];
+            unsigned b = rgba[i + 2];
+            unsigned a = rgba[i + 3];
+
+            if (depth == 32) {
+                /* Pre-multiply alpha (compositors expect this). */
+                r = (r * a + 127) / 255;
+                g = (g * a + 127) / 255;
+                b = (b * a + 127) / 255;
+            }
+
+            unsigned long pixel =
+                ((unsigned long)(r << rs) & vis->red_mask)   |
+                ((unsigned long)(g << gs) & vis->green_mask)  |
+                ((unsigned long)(b << bs) & vis->blue_mask);
+
+            if (depth == 32)
+                pixel |= ((unsigned long)a << 24);
+
+            XPutPixel(img, x, y, pixel);
+        }
+    }
+
+    return img;
+}
+
+/*
+ * Set the _NET_WM_ICON property (ARGB, native byte order).
+ */
+static void x11_set_net_wm_icon(Display *dpy, Window win, Atom xa,
+                                 const unsigned char *rgba, int w, int h)
+{
+    int n = w * h;
+    /* _NET_WM_ICON data: [width, height, pixel, pixel, ...] */
+    unsigned long *data = (unsigned long *)malloc(((size_t)n + 2) *
+                                                   sizeof(unsigned long));
+    if (!data) return;
+    data[0] = (unsigned long)w;
+    data[1] = (unsigned long)h;
+    for (int i = 0; i < n; i++) {
+        unsigned long a = rgba[i * 4 + 3];
+        unsigned long r = rgba[i * 4 + 0];
+        unsigned long g = rgba[i * 4 + 1];
+        unsigned long b = rgba[i * 4 + 2];
+        data[2 + i] = (a << 24) | (r << 16) | (g << 8) | b;
+    }
+    XChangeProperty(dpy, win, xa, XA_CARDINAL, 32,
+                    PropModeReplace, (unsigned char *)data, n + 2);
+    free(data);
+}
+
+/*
+ * Rebuild the XImage after a window resize or icon change.
+ */
+static void x11_rebuild_ximage(traycon *tray)
+{
+    if (tray->x11.ximg) {
+        XDestroyImage(tray->x11.ximg);   /* frees ximg->data too */
+        tray->x11.ximg = NULL;
+    }
+
+    if (!tray->x11.icon_rgba || tray->x11.icon_w <= 0 ||
+        tray->x11.icon_h <= 0 || tray->x11.win_w <= 0 ||
+        tray->x11.win_h <= 0)
+        return;
+
+    tray->x11.ximg = x11_make_ximage(
+        tray->x11.dpy, tray->x11.visual, tray->x11.depth,
+        tray->x11.icon_rgba,
+        tray->x11.icon_w, tray->x11.icon_h,
+        tray->x11.win_w,  tray->x11.win_h);
+}
+
+/*
+ * Draw the current icon into the X11 window.
+ */
+static void x11_draw(traycon *tray)
+{
+    if (!tray->x11.ximg) return;
+    XPutImage(tray->x11.dpy, tray->x11.win, tray->x11.gc,
+              tray->x11.ximg, 0, 0, 0, 0,
+              (unsigned)tray->x11.win_w, (unsigned)tray->x11.win_h);
+}
+
+/* ------------------------------------------------------------------ */
+/*  X11 backend functions                                              */
+/* ------------------------------------------------------------------ */
+
+static int  x11_update_icon(traycon *tray, const unsigned char *rgba,
+                            int width, int height);
+static int  x11_step(traycon *tray);
+static void x11_destroy(traycon *tray);
+static int  x11_set_visible(traycon *tray, int visible);
+
+static traycon *x11_try_create(const unsigned char *rgba, int width,
+                               int height, traycon_click_cb cb,
+                               void *userdata)
+{
+    /* Check if X11 is available */
+    Display *dpy = XOpenDisplay(NULL);
+    if (!dpy) return NULL;
+
+    int screen = DefaultScreen(dpy);
+
+    /* Intern atoms -------------------------------------------------- */
+    char tray_sel_name[64];
+    snprintf(tray_sel_name, sizeof tray_sel_name,
+             "_NET_SYSTEM_TRAY_S%d", screen);
+
+    Atom xa_tray_sel     = XInternAtom(dpy, tray_sel_name, False);
+    Atom xa_tray_opcode  = XInternAtom(dpy, "_NET_SYSTEM_TRAY_OPCODE", False);
+    Atom xa_tray_visual  = XInternAtom(dpy, "_NET_SYSTEM_TRAY_VISUAL", False);
+    Atom xa_xembed_info  = XInternAtom(dpy, "_XEMBED_INFO", False);
+    Atom xa_net_wm_icon  = XInternAtom(dpy, "_NET_WM_ICON", False);
+    Atom xa_manager      = XInternAtom(dpy, "MANAGER", False);
+
+    /* Find the system tray manager ---------------------------------- */
+    Window tray_mgr = XGetSelectionOwner(dpy, xa_tray_sel);
+    if (tray_mgr == None) {
+        fprintf(stderr, "traycon: no X11 system tray found\n");
+        XCloseDisplay(dpy);
+        return NULL;
+    }
+
+    /* Determine the visual the tray wants us to use ----------------- */
+    Visual *vis     = DefaultVisual(dpy, screen);
+    int     depth   = DefaultDepth(dpy, screen);
+    Colormap cmap   = DefaultColormap(dpy, screen);
+    int own_cmap    = 0;
+
+    {
+        Atom actual_type;
+        int  actual_format;
+        unsigned long nitems, bytes_after;
+        unsigned char *prop_data = NULL;
+
+        if (XGetWindowProperty(dpy, tray_mgr, xa_tray_visual,
+                               0, 1, False, XA_VISUALID,
+                               &actual_type, &actual_format,
+                               &nitems, &bytes_after,
+                               &prop_data) == Success &&
+            nitems > 0 && prop_data)
+        {
+            VisualID vid = *(VisualID *)prop_data;
+            XVisualInfo tmpl;
+            tmpl.visualid = vid;
+            int nvis = 0;
+            XVisualInfo *vi = XGetVisualInfo(dpy, VisualIDMask, &tmpl, &nvis);
+            if (vi && nvis > 0) {
+                vis   = vi[0].visual;
+                depth = vi[0].depth;
+                cmap  = XCreateColormap(dpy, RootWindow(dpy, screen),
+                                        vis, AllocNone);
+                own_cmap = 1;
+            }
+            if (vi) XFree(vi);
+        }
+        if (prop_data) XFree(prop_data);
+    }
+
+    /* Create the icon window ---------------------------------------- */
+    XSetWindowAttributes attr;
+    memset(&attr, 0, sizeof attr);
+    attr.colormap         = cmap;
+    attr.background_pixel = 0;
+    attr.border_pixel     = 0;
+    unsigned long amask   = CWColormap | CWBackPixel | CWBorderPixel;
+
+    Window win = XCreateWindow(
+        dpy, RootWindow(dpy, screen),
+        0, 0, (unsigned)width, (unsigned)height, 0,
+        depth, InputOutput, vis,
+        amask, &attr);
+    if (!win) {
+        fprintf(stderr, "traycon: XCreateWindow failed\n");
+        if (own_cmap) XFreeColormap(dpy, cmap);
+        XCloseDisplay(dpy);
+        return NULL;
+    }
+
+    /* Select events we care about */
+    XSelectInput(dpy, win,
+                 ExposureMask | ButtonPressMask | StructureNotifyMask);
+
+    /* Set _XEMBED_INFO: version 0, flags = XEMBED_MAPPED */
+    unsigned long xembed_data[2] = { 0, X11_XEMBED_MAPPED };
+    XChangeProperty(dpy, win, xa_xembed_info, xa_xembed_info,
+                    32, PropModeReplace,
+                    (unsigned char *)xembed_data, 2);
+
+    /* Set _NET_WM_ICON */
+    x11_set_net_wm_icon(dpy, win, xa_net_wm_icon, rgba, width, height);
+
+    /* Map the window before docking (some tray managers require this) */
+    XMapRaised(dpy, win);
+
+    /* Send SYSTEM_TRAY_REQUEST_DOCK to the tray manager ------------- */
+    {
+        XEvent ev;
+        memset(&ev, 0, sizeof ev);
+        ev.xclient.type         = ClientMessage;
+        ev.xclient.window       = tray_mgr;
+        ev.xclient.message_type = xa_tray_opcode;
+        ev.xclient.format       = 32;
+        ev.xclient.data.l[0]    = CurrentTime;
+        ev.xclient.data.l[1]    = X11_SYSTEM_TRAY_REQUEST_DOCK;
+        ev.xclient.data.l[2]    = (long)win;
+
+        XSendEvent(dpy, tray_mgr, False, NoEventMask, &ev);
+        XFlush(dpy);
+    }
+
+    /* Create the GC ------------------------------------------------- */
+    GC gc = XCreateGC(dpy, win, 0, NULL);
+
+    /* Allocate traycon ---------------------------------------------- */
+    traycon *tray = (traycon *)calloc(1, sizeof *tray);
+    if (!tray) {
+        XFreeGC(dpy, gc);
+        XDestroyWindow(dpy, win);
+        if (own_cmap) XFreeColormap(dpy, cmap);
+        XCloseDisplay(dpy);
+        return NULL;
+    }
+
+    tray->fn_update_icon = x11_update_icon;
+    tray->fn_step        = x11_step;
+    tray->fn_destroy     = x11_destroy;
+    tray->fn_set_visible = x11_set_visible;
+    tray->cb             = cb;
+    tray->userdata       = userdata;
+    tray->visible        = 1;
+
+    tray->x11.dpy            = dpy;
+    tray->x11.win            = win;
+    tray->x11.gc             = gc;
+    tray->x11.visual         = vis;
+    tray->x11.cmap           = cmap;
+    tray->x11.depth          = depth;
+    tray->x11.screen         = screen;
+    tray->x11.own_cmap       = own_cmap;
+    tray->x11.win_w          = width;
+    tray->x11.win_h          = height;
+    tray->x11.xa_tray_sel    = xa_tray_sel;
+    tray->x11.xa_tray_opcode = xa_tray_opcode;
+    tray->x11.xa_tray_visual = xa_tray_visual;
+    tray->x11.xa_xembed_info = xa_xembed_info;
+    tray->x11.xa_net_wm_icon = xa_net_wm_icon;
+    tray->x11.xa_manager     = xa_manager;
+
+    /* Copy the RGBA data */
+    size_t rgba_size = (size_t)width * height * 4;
+    tray->x11.icon_rgba = (unsigned char *)malloc(rgba_size);
+    if (!tray->x11.icon_rgba) {
+        XFreeGC(dpy, gc);
+        XDestroyWindow(dpy, win);
+        if (own_cmap) XFreeColormap(dpy, cmap);
+        XCloseDisplay(dpy);
+        free(tray);
+        return NULL;
+    }
+    memcpy(tray->x11.icon_rgba, rgba, rgba_size);
+    tray->x11.icon_w = width;
+    tray->x11.icon_h = height;
+
+    /* Build the initial XImage */
+    x11_rebuild_ximage(tray);
+
+    return tray;
+}
+
+static int x11_update_icon(traycon *tray, const unsigned char *rgba,
+                           int width, int height)
+{
+    /* Replace stored RGBA data */
+    size_t rgba_size = (size_t)width * height * 4;
+    unsigned char *new_rgba = (unsigned char *)malloc(rgba_size);
+    if (!new_rgba) return -1;
+    memcpy(new_rgba, rgba, rgba_size);
+
+    free(tray->x11.icon_rgba);
+    tray->x11.icon_rgba = new_rgba;
+    tray->x11.icon_w    = width;
+    tray->x11.icon_h    = height;
+
+    /* Update _NET_WM_ICON */
+    x11_set_net_wm_icon(tray->x11.dpy, tray->x11.win,
+                         tray->x11.xa_net_wm_icon, rgba, width, height);
+
+    /* Rebuild XImage at current window size and redraw */
+    x11_rebuild_ximage(tray);
+    x11_draw(tray);
+    XFlush(tray->x11.dpy);
+    return 0;
+}
+
+static int x11_step(traycon *tray)
+{
+    Display *dpy = tray->x11.dpy;
+    if (!dpy) return -1;
+
+    while (XPending(dpy)) {
+        XEvent ev;
+        XNextEvent(dpy, &ev);
+
+        switch (ev.type) {
+        case Expose:
+            if (ev.xexpose.count == 0)
+                x11_draw(tray);
+            break;
+
+        case ButtonPress:
+            if (ev.xbutton.button == Button1) {
+                if (tray->cb) tray->cb(tray, tray->userdata);
+            }
+            break;
+
+        case ConfigureNotify:
+            if (ev.xconfigure.width  != tray->x11.win_w ||
+                ev.xconfigure.height != tray->x11.win_h)
+            {
+                tray->x11.win_w = ev.xconfigure.width;
+                tray->x11.win_h = ev.xconfigure.height;
+                x11_rebuild_ximage(tray);
+                x11_draw(tray);
+            }
+            break;
+
+        case DestroyNotify:
+            if (ev.xdestroywindow.window == tray->x11.win) {
+                tray->x11.win = None;
+                return -1;
+            }
+            break;
+
+        case ReparentNotify:
+            /* Normal: the tray manager reparents our window. */
+            break;
+
+        default:
+            break;
+        }
+    }
+    return 0;
+}
+
+static void x11_destroy(traycon *tray)
+{
+    Display *dpy = tray->x11.dpy;
+    if (!dpy) return;
+
+    if (tray->x11.ximg) {
+        XDestroyImage(tray->x11.ximg);
+        tray->x11.ximg = NULL;
+    }
+    free(tray->x11.icon_rgba);
+    tray->x11.icon_rgba = NULL;
+
+    if (tray->x11.gc) XFreeGC(dpy, tray->x11.gc);
+    if (tray->x11.win) XDestroyWindow(dpy, tray->x11.win);
+    if (tray->x11.own_cmap) XFreeColormap(dpy, tray->x11.cmap);
+    XCloseDisplay(dpy);
+    tray->x11.dpy = NULL;
+}
+
+static int x11_set_visible(traycon *tray, int visible)
+{
+    tray->visible = visible;
+
+    /* Update the XEMBED_MAPPED flag in _XEMBED_INFO */
+    unsigned long xembed_data[2] = {
+        0, visible ? X11_XEMBED_MAPPED : 0
+    };
+    XChangeProperty(tray->x11.dpy, tray->x11.win,
+                    tray->x11.xa_xembed_info,
+                    tray->x11.xa_xembed_info,
+                    32, PropModeReplace,
+                    (unsigned char *)xembed_data, 2);
+    XFlush(tray->x11.dpy);
+    return 0;
+}
+
+#endif /* !TRAYCON_NO_X11 */
+
+/* ================================================================== */
+/*                                                                      */
+/*  PUBLIC API – auto-detection and dispatch                            */
+/*                                                                      */
+/* ================================================================== */
+
+traycon *traycon_create(const unsigned char *rgba, int width, int height,
+                        traycon_click_cb cb, void *userdata)
+{
+    if (!rgba || width <= 0 || height <= 0)
+        return NULL;
+
+    int backend = traycon__preferred_backend;
+
+    /* --- Explicit backend request ---------------------------------- */
+
+#ifndef TRAYCON_NO_SNI
+    if (backend == TRAYCON_BACKEND_SNI)
+        return sni_try_create(rgba, width, height, cb, userdata);
+#endif
+
+#ifndef TRAYCON_NO_X11
+    if (backend == TRAYCON_BACKEND_X11)
+        return x11_try_create(rgba, width, height, cb, userdata);
+#endif
+
+    /* --- Auto-detect ----------------------------------------------- */
+    if (backend == TRAYCON_BACKEND_AUTO) {
+        traycon *tray = NULL;
+
+#ifndef TRAYCON_NO_SNI
+        tray = sni_try_create(rgba, width, height, cb, userdata);
+        if (tray) return tray;
+#endif
+
+#ifndef TRAYCON_NO_X11
+        tray = x11_try_create(rgba, width, height, cb, userdata);
+        if (tray) return tray;
+#endif
+
+        return NULL;
+    }
+
+    /* Unknown backend id */
+    return NULL;
+}
+
+int traycon_update_icon(traycon *tray, const unsigned char *rgba,
+                        int width, int height)
+{
+    if (!tray || !rgba || width <= 0 || height <= 0)
+        return -1;
+    return tray->fn_update_icon(tray, rgba, width, height);
+}
+
+int traycon_step(traycon *tray)
+{
+    if (!tray) return -1;
+    return tray->fn_step(tray);
+}
+
+void traycon_destroy(traycon *tray)
+{
+    if (!tray) return;
+    tray->fn_destroy(tray);
+    free(tray);
+}
+
+int traycon_set_visible(traycon *tray, int visible)
+{
+    if (!tray) return -1;
+    visible = visible ? 1 : 0;
+    if (tray->visible == visible) return 0;
+    return tray->fn_set_visible(tray, visible);
 }
 #endif /* __linux__ */
 /* ====== end traycon_linux.c ====== */
@@ -823,6 +1437,8 @@ int traycon_set_visible(traycon *tray, int visible)
     return 0;
 }
 
+void traycon_set_preferred_backend(int backend) { (void)backend; }
+
 #endif /* _WIN32 */
 /* ====== end traycon_win32.c ====== */
 
@@ -996,6 +1612,8 @@ int traycon_set_visible(traycon *tray, int visible)
     tray->item.visible = visible ? YES : NO;
     return 0;
 }
+
+void traycon_set_preferred_backend(int backend) { (void)backend; }
 
 #endif /* __APPLE__ */
 /* ====== end traycon_macos.m ====== */

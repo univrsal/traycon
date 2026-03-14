@@ -15,6 +15,21 @@ typedef struct traycon traycon;
 typedef void (*traycon_click_cb)(traycon *tray, void *userdata);
 
 /*
+ * Linux backend selection (no-op on macOS / Windows).
+ *
+ * TRAYCON_BACKEND_AUTO – try SNI (D-Bus), fall back to X11  (default)
+ * TRAYCON_BACKEND_SNI  – StatusNotifierItem via D-Bus (Wayland / KDE)
+ * TRAYCON_BACKEND_X11  – XEmbed system tray protocol  (X11)
+ *
+ * Call traycon_set_preferred_backend() before traycon_create().
+ */
+#define TRAYCON_BACKEND_AUTO  0
+#define TRAYCON_BACKEND_SNI   1
+#define TRAYCON_BACKEND_X11   2
+
+void traycon_set_preferred_backend(int backend);
+
+/*
  * Create a tray icon from raw RGBA pixel data.
  *
  * rgba     - pointer to width * height * 4 bytes (R, G, B, A per pixel,
