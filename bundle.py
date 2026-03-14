@@ -24,9 +24,14 @@ SRC_DIR = os.path.join(SCRIPT_DIR, "src")
 OUTPUT = os.path.join(SCRIPT_DIR, "traycon.h")
 
 HEADER = os.path.join(SRC_DIR, "traycon.h")
+
+# (filename, platform_guard)
+# Files that already contain their own #ifdef guard use None;
+# files without one get wrapped with the given guard here.
 IMPL_FILES = [
-    os.path.join(SRC_DIR, "traycon_linux.c"),
-    os.path.join(SRC_DIR, "traycon_win32.c"),
+    (os.path.join(SRC_DIR, "traycon_linux.c"),  "__linux__"),
+    (os.path.join(SRC_DIR, "traycon_win32.c"),  None),
+    (os.path.join(SRC_DIR, "traycon_macos.m"),  None),
 ]
 
 
@@ -53,13 +58,16 @@ def build():
     header_body = strip_header_guard_close(header_src)
 
     impl_parts = []
-    for path in IMPL_FILES:
+    for path, guard in IMPL_FILES:
         src = read(path)
         src = strip_local_includes(src)
         name = os.path.basename(path)
+        body = src.strip()
+        if guard:
+            body = f"#ifdef {guard}\n{body}\n#endif /* {guard} */"
         impl_parts.append(
             f"/* ====== begin {name} ====== */\n"
-            f"{src.strip()}\n"
+            f"{body}\n"
             f"/* ====== end {name} ====== */"
         )
 
@@ -96,7 +104,7 @@ def build():
 
     print(f"Bundled -> {os.path.relpath(OUTPUT, SCRIPT_DIR)}")
     print(f"  header:  {os.path.relpath(HEADER, SCRIPT_DIR)}")
-    for p in IMPL_FILES:
+    for p, _ in IMPL_FILES:
         print(f"  impl:    {os.path.relpath(p, SCRIPT_DIR)}")
 
 

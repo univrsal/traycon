@@ -9,6 +9,11 @@ ifeq ($(UNAME),Linux)
   DBUS_LIBS   := $(shell pkg-config --libs   dbus-1)
   PLATFORM_CFLAGS = $(DBUS_CFLAGS)
   PLATFORM_LIBS   = $(DBUS_LIBS)
+else ifeq ($(UNAME),Darwin)
+  # Compile as Objective-C so the AppKit implementation in the bundled
+  # header is accepted by the compiler.
+  PLATFORM_CFLAGS = -x objective-c
+  PLATFORM_LIBS   = -framework Cocoa
 else ifeq ($(OS),Windows_NT)
   PLATFORM_CFLAGS =
   PLATFORM_LIBS   = -lshell32 -luser32 -lgdi32
