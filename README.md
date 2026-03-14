@@ -36,7 +36,7 @@ All other files just include the header without the define:
 ### macOS note
 
 The AppKit backend is written in Objective-C. The translation unit that
-defines `TRAYCON_IMPLEMENTATION` must therefore be compiled as Objective-C —
+defines `TRAYCON_IMPLEMENTATION` must therefore be compiled as Objective-C -
 either give it a `.m` extension or pass `-x objective-c` to the compiler.
 Link with `-framework Cocoa`.
 
