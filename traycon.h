@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, Alex <uni@vrsal.cc>
+ * Copyright (c) 2026, Alex <uni@vrsal.cc>
  * SPDX-License-Identifier: BSD-3-Clause
  */
 #ifndef TRAYCON_H

@@ -7,6 +7,8 @@ Minimal C library for creating system tray icons on **Linux** and **Windows**.
 | Linux (Wayland / KDE) | StatusNotifierItem via D-Bus (`libdbus-1`) |
 | Windows               | `Shell_NotifyIconW` (Win32)                |
 
+Just include `traycon.h` and define `TRAYCON_IMPLEMENTATION` in one source file before including it to use it.
+
 ## Example
 
 ```c
