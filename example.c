@@ -1,6 +1,6 @@
 /*
  * traycon example – creates a blue circle tray icon with a context menu.
- * Left-click toggles the colour; right-click opens the menu.
+ * Left-click toggles the r; right-click opens the menu.
  */
 
 #define _DEFAULT_SOURCE  /* usleep */
@@ -29,7 +29,7 @@ static void on_click(traycon *tray, void *userdata)
     click_count++;
     printf("tray icon clicked (%d)\n", click_count);
 
-    /* Swap colour between blue and green on each click */
+    /* Swap color between blue and green on each click */
     int w = 32, h = 32;
     unsigned char *px = (unsigned char *)malloc((size_t)w * h * 4);
     if (!px) return;
@@ -69,7 +69,7 @@ static void on_menu(traycon *tray, int item_id, void *userdata)
         printf("menu: Hello!\n");
         break;
     case MENU_TOGGLE:
-        printf("menu: Toggle colour\n");
+        printf("menu: Toggle r\n");
         on_click(tray, NULL);
         break;
     case MENU_QUIT:
@@ -115,7 +115,7 @@ int main(void)
     /* Set up a right-click context menu */
     traycon_menu_item menu[] = {
         { "Hello",          MENU_HELLO,  0 },
-        { "Toggle Colour",  MENU_TOGGLE, 0 },
+        { "Toggle Color",  MENU_TOGGLE, 0 },
         { NULL,             0,           0 },           /* separator */
         { "Quit",           MENU_QUIT,   0 },
     };

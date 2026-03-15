@@ -154,7 +154,7 @@ int main(void)
 
     traycon_menu_item menu[] = {
         { "Hello",          MENU_HELLO,  0 },
-        { "Toggle Colour",  MENU_TOGGLE, 0 },
+        { "Toggle Color",   MENU_TOGGLE, 0 },
         { NULL,             0,           0 },           /* separator */
         { "Quit",           MENU_QUIT,   0 },
     };
