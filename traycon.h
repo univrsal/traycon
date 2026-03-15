@@ -120,10 +120,10 @@ int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
 #ifndef TRAYCON_IMPLEMENTATION_GUARD
 #define TRAYCON_IMPLEMENTATION_GUARD
 
-/* ====== begin traycon_linux.c ====== */
-#ifdef __linux__
+/* ====== begin traycon_linux_bsd.c ====== */
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
 /*
- * traycon – Linux implementation
+ * traycon – Linux / BSD implementation
  *
  * Supports two backends:
  *   1. SNI  – StatusNotifierItem via D-Bus (Wayland / KDE / modern DEs)
@@ -132,6 +132,9 @@ int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
  * By default auto-detects: tries SNI first, falls back to X11.
  * Override with traycon_set_preferred_backend() or compile-time defines
  * TRAYCON_NO_SNI / TRAYCON_NO_X11.
+ *
+ * Supported platforms: Linux, FreeBSD, OpenBSD, NetBSD, DragonFly BSD.
+ * Both libdbus-1 and libX11 are available on all these systems.
  *
  * Dependencies:
  *   SNI  – libdbus-1  (pkg-config dbus-1)
@@ -2080,18 +2083,17 @@ int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
     if (!tray->fn_set_menu) return -1;
     return tray->fn_set_menu(tray, items, count, cb, userdata);
 }
-#endif /* __linux__ */
-/* ====== end traycon_linux.c ====== */
+#endif /* __linux__ || BSD */
+/* ====== end traycon_linux_bsd.c ====== */
 
 /* ====== begin traycon_win32.c ====== */
+#if defined(_WIN32)
 /*
  * traycon – Windows implementation
  *
  * Uses Shell_NotifyIconW and a message-only window to display a
  * system-tray icon and receive click notifications.
  */
-#ifdef _WIN32
-
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -2414,11 +2416,11 @@ int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
 }
 
 void traycon_set_preferred_backend(int backend) { (void)backend; }
-
 #endif /* _WIN32 */
 /* ====== end traycon_win32.c ====== */
 
 /* ====== begin traycon_macos.m ====== */
+#if defined(__APPLE__)
 /*
  * traycon – macOS implementation
  *
@@ -2431,8 +2433,6 @@ void traycon_set_preferred_backend(int backend) { (void)backend; }
  * compiled as Objective-C (i.e. have a .m extension, or be compiled
  * with -x objective-c).
  */
-#ifdef __APPLE__
-
 #import <Cocoa/Cocoa.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2691,7 +2691,6 @@ int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
 }
 
 void traycon_set_preferred_backend(int backend) { (void)backend; }
-
 #endif /* __APPLE__ */
 /* ====== end traycon_macos.m ====== */
 

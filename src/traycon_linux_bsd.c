@@ -1,5 +1,5 @@
 /*
- * traycon – Linux implementation
+ * traycon – Linux / BSD implementation
  *
  * Supports two backends:
  *   1. SNI  – StatusNotifierItem via D-Bus (Wayland / KDE / modern DEs)
@@ -8,6 +8,9 @@
  * By default auto-detects: tries SNI first, falls back to X11.
  * Override with traycon_set_preferred_backend() or compile-time defines
  * TRAYCON_NO_SNI / TRAYCON_NO_X11.
+ *
+ * Supported platforms: Linux, FreeBSD, OpenBSD, NetBSD, DragonFly BSD.
+ * Both libdbus-1 and libX11 are available on all these systems.
  *
  * Dependencies:
  *   SNI  – libdbus-1  (pkg-config dbus-1)

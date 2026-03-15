@@ -1,15 +1,17 @@
 # traycon
 
-Minimal C library for creating system tray icons on **Linux**, **macOS**, and **Windows**.
+Minimal C library for creating system tray icons on **Linux**, **BSD**, **macOS**, and **Windows**.
 
-| Platform              | Backend                                    |
-| --------------------- | ------------------------------------------ |
-| Linux (Wayland / KDE) | StatusNotifierItem via D-Bus (`libdbus-1`) |
-| Linux (X11)           | XEmbed system tray protocol (`libX11`)     |
-| macOS                 | `NSStatusBar` / `NSStatusItem` (AppKit)    |
-| Windows               | `Shell_NotifyIconW` (Win32)                |
+| Platform                    | Backend                                    |
+| --------------------------- | ------------------------------------------ |
+| Linux / BSD (Wayland / KDE) | StatusNotifierItem via D-Bus (`libdbus-1`) |
+| Linux / BSD (X11)           | XEmbed system tray protocol (`libX11`)     |
+| macOS                       | `NSStatusBar` / `NSStatusItem` (AppKit)    |
+| Windows                     | `Shell_NotifyIconW` (Win32)                |
 
-On Linux both backends are compiled in by default. At runtime the library
+BSD variants supported: FreeBSD, OpenBSD, NetBSD, DragonFly BSD.
+
+On Linux and BSD both backends are compiled in by default. At runtime the library
 **auto-detects** the best one: it tries the D-Bus/SNI backend first (works
 on KDE Plasma, GNOME with AppIndicator, etc.) and falls back to the X11
 system tray if no StatusNotifierWatcher is available.
@@ -185,13 +187,13 @@ make clean    # removes example and traycon.h
 
 Platform dependencies:
 
-| Platform | Requirement                                |
-| -------- | ------------------------------------------ |
-| Linux    | `libdbus-1` and/or `libX11` (`pkg-config`) |
-| macOS    | `-framework Cocoa` (default)               |
-| Windows  | `shell32`, `user32`, `gdi32`               |
+| Platform    | Requirement                                |
+| ----------- | ------------------------------------------ |
+| Linux / BSD | `libdbus-1` and/or `libX11` (`pkg-config`) |
+| macOS       | `-framework Cocoa` (default)               |
+| Windows     | `shell32`, `user32`, `gdi32`               |
 
-To compile with only one Linux backend, pass a define:
+To compile with only one Linux/BSD backend, pass a define:
 
 ```sh
 make EXTRA_CFLAGS=-DTRAYCON_NO_SNI   # X11 only, no libdbus dependency

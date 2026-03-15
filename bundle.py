@@ -25,12 +25,17 @@ OUTPUT = os.path.join(SCRIPT_DIR, "traycon.h")
 
 HEADER = os.path.join(SRC_DIR, "traycon.h")
 
-# (filename, platform_guard)
-# Each file is wrapped with the given platform guard by this script.
+# (filename, platform_guard_expr, endif_comment)
+# Each file is wrapped with the given #if expression by this script.
 IMPL_FILES = [
-    (os.path.join(SRC_DIR, "traycon_linux.c"),  "__linux__"),
-    (os.path.join(SRC_DIR, "traycon_win32.c"),  "_WIN32"),
-    (os.path.join(SRC_DIR, "traycon_macos.m"),  "__APPLE__"),
+    (
+        os.path.join(SRC_DIR, "traycon_linux_bsd.c"),
+        "defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__) "
+        "|| defined(__NetBSD__) || defined(__DragonFly__)",
+        "__linux__ || BSD",
+    ),
+    (os.path.join(SRC_DIR, "traycon_win32.c"),  "defined(_WIN32)",   "_WIN32"),
+    (os.path.join(SRC_DIR, "traycon_macos.m"),  "defined(__APPLE__)", "__APPLE__"),
 ]
 
 
@@ -57,13 +62,13 @@ def build():
     header_body = strip_header_guard_close(header_src)
 
     impl_parts = []
-    for path, guard in IMPL_FILES:
+    for path, guard, comment in IMPL_FILES:
         src = read(path)
         src = strip_local_includes(src)
         name = os.path.basename(path)
         body = src.strip()
         if guard:
-            body = f"#ifdef {guard}\n{body}\n#endif /* {guard} */"
+            body = f"#if {guard}\n{body}\n#endif /* {comment} */"
         impl_parts.append(
             f"/* ====== begin {name} ====== */\n"
             f"{body}\n"
@@ -103,7 +108,7 @@ def build():
 
     print(f"Bundled -> {os.path.relpath(OUTPUT, SCRIPT_DIR)}")
     print(f"  header:  {os.path.relpath(HEADER, SCRIPT_DIR)}")
-    for p, _ in IMPL_FILES:
+    for p, *_ in IMPL_FILES:
         print(f"  impl:    {os.path.relpath(p, SCRIPT_DIR)}")
 
 
