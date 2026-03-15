@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'bundle.py'
+      - 'example.c'
+      - 'traycon.h'
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libx11-dev
+
+      - name: Bundle traycon.h
+        run: python3 bundle.py
+
+      - name: Build example
+        run: make
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bundle traycon.h
+        run: python3 bundle.py
+
+      - name: Build example
+        run: make
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Bundle traycon.h
+        run: python bundle.py
+
+      - name: Build example
+        run: cl.exe /W3 /O2 /I. example.c shell32.lib user32.lib gdi32.lib /Fe:example.exe
