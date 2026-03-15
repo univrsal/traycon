@@ -21,6 +21,37 @@
 #define TRAY_ICON_ID 1
 
 /* ------------------------------------------------------------------ */
+/*  Internal menu helpers                                              */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    char *label;   /* heap copy; NULL = separator */
+    int   id;
+    int   flags;
+} traycon__menu_entry;
+
+static traycon__menu_entry *traycon__copy_menu(const traycon_menu_item *items,
+                                               int count)
+{
+    if (count <= 0 || !items) return NULL;
+    traycon__menu_entry *e = (traycon__menu_entry *)calloc(count, sizeof *e);
+    if (!e) return NULL;
+    for (int i = 0; i < count; i++) {
+        e[i].id    = items[i].id;
+        e[i].flags = items[i].flags;
+        e[i].label = items[i].label ? _strdup(items[i].label) : NULL;
+    }
+    return e;
+}
+
+static void traycon__free_menu(traycon__menu_entry *e, int count)
+{
+    if (!e) return;
+    for (int i = 0; i < count; i++) free(e[i].label);
+    free(e);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Internal data                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -31,6 +62,12 @@ struct traycon {
     traycon_click_cb cb;
     void            *userdata;
     int              visible;   /* non-zero = shown, zero = hidden */
+
+    /* context menu */
+    traycon__menu_entry *menu_items;
+    int                  menu_count;
+    traycon_menu_cb      menu_cb;
+    void                *menu_userdata;
 };
 
 static const wchar_t CLASS_NAME[] = L"traycon_wnd";
@@ -109,6 +146,51 @@ wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         /* lParam = mouse message (uVersion 0) */
         if (lp == WM_LBUTTONUP) {
             if (tray->cb) tray->cb(tray, tray->userdata);
+        }
+        if (lp == WM_RBUTTONUP && tray->menu_items && tray->menu_count > 0) {
+            /* Build and show popup menu */
+            HMENU hmenu = CreatePopupMenu();
+            if (hmenu) {
+                for (int i = 0; i < tray->menu_count; i++) {
+                    traycon__menu_entry *e = &tray->menu_items[i];
+                    if (!e->label) {
+                        AppendMenuW(hmenu, MF_SEPARATOR, 0, NULL);
+                    } else {
+                        UINT flags = MF_STRING;
+                        if (e->flags & TRAYCON_MENU_DISABLED)
+                            flags |= MF_GRAYED;
+                        if (e->flags & TRAYCON_MENU_CHECKED)
+                            flags |= MF_CHECKED;
+                        /* Convert label to wide string */
+                        int wlen = MultiByteToWideChar(CP_UTF8, 0,
+                                       e->label, -1, NULL, 0);
+                        wchar_t *wlabel = (wchar_t *)malloc(
+                                       (size_t)wlen * sizeof(wchar_t));
+                        if (wlabel) {
+                            MultiByteToWideChar(CP_UTF8, 0,
+                                e->label, -1, wlabel, wlen);
+                            AppendMenuW(hmenu, flags,
+                                        (UINT_PTR)(i + 1), wlabel);
+                            free(wlabel);
+                        }
+                    }
+                }
+                POINT pt;
+                GetCursorPos(&pt);
+                SetForegroundWindow(hwnd);
+                int cmd = (int)TrackPopupMenu(hmenu,
+                              TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                              pt.x, pt.y, 0, hwnd, NULL);
+                PostMessageW(hwnd, WM_NULL, 0, 0);
+                DestroyMenu(hmenu);
+                if (cmd > 0) {
+                    int idx = cmd - 1;
+                    if (tray->menu_cb && idx < tray->menu_count)
+                        tray->menu_cb(tray,
+                            tray->menu_items[idx].id,
+                            tray->menu_userdata);
+                }
+            }
         }
         return 0;
     }
@@ -214,6 +296,7 @@ void traycon_destroy(traycon *tray)
         Shell_NotifyIconW(NIM_DELETE, &tray->nid);
     if (tray->hicon) DestroyIcon(tray->hicon);
     if (tray->hwnd)  DestroyWindow(tray->hwnd);
+    traycon__free_menu(tray->menu_items, tray->menu_count);
     free(tray);
 }
 
@@ -232,6 +315,18 @@ int traycon_set_visible(traycon *tray, int visible)
         if (!Shell_NotifyIconW(NIM_DELETE, &tray->nid)) return -1;
     }
     tray->visible = visible;
+    return 0;
+}
+
+int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
+                     int count, traycon_menu_cb cb, void *userdata)
+{
+    if (!tray) return -1;
+    traycon__free_menu(tray->menu_items, tray->menu_count);
+    tray->menu_items    = traycon__copy_menu(items, count);
+    tray->menu_count    = (items && count > 0) ? count : 0;
+    tray->menu_cb       = cb;
+    tray->menu_userdata = userdata;
     return 0;
 }
 

@@ -22,6 +22,7 @@ Features:
 - Create and update tray icon from raw RGBA data
 - Callback for left clicking
 - Hide/show icon
+- Simple right-click menu with separators, no nested sub-menus
 
 ## Usage
 
@@ -71,6 +72,10 @@ void traycon_destroy(traycon *tray);
 // Hide/show the icon
 int traycon_set_visible(traycon* tray, int visible);
 
+// Set the tray icon menu items
+int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
+                     int count, traycon_menu_cb cb, void *userdata);
+
 // Linux only: choose backend before traycon_create().
 // TRAYCON_BACKEND_AUTO (0) – try SNI, fall back to X11 (default)
 // TRAYCON_BACKEND_SNI  (1) – D-Bus StatusNotifierItem only
@@ -105,6 +110,27 @@ static void on_click(traycon *tray, void *userdata)
     printf("clicked!\n");
 }
 
+enum { MENU_HELLO = 1, MENU_TOGGLE, MENU_QUIT };
+static int running = 1;
+
+static void on_menu(traycon *tray, int item_id, void *userdata)
+{
+    (void)userdata;
+    switch (item_id) {
+    case MENU_HELLO:
+        printf("menu: Hello!\n");
+        break;
+    case MENU_TOGGLE:
+        printf("menu: Toggle color\n");
+        on_click(tray, NULL);
+        break;
+    case MENU_QUIT:
+        printf("menu: Quit\n");
+        running = 0;
+        break;
+    }
+}
+
 int main(void)
 {
     int w = 32, h = 32;
@@ -126,9 +152,19 @@ int main(void)
     free(px);
     if (!tray) { fprintf(stderr, "failed\n"); return 1; }
 
+    traycon_menu_item menu[] = {
+        { "Hello",          MENU_HELLO,  0 },
+        { "Toggle Colour",  MENU_TOGGLE, 0 },
+        { NULL,             0,           0 },           /* separator */
+        { "Quit",           MENU_QUIT,   0 },
+    };
+    traycon_set_menu(tray, menu, 4, on_menu, NULL);
+
     printf("Click the tray icon.  Ctrl-C to quit.\n");
-    for (;;) {
-        if (traycon_step(tray) < 0) break;
+
+    while (running) {
+        if (traycon_step(tray) < 0)
+            break;
         SLEEP_MS(50);
     }
 

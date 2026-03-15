@@ -1,6 +1,6 @@
 /*
- * traycon example – creates a blue circle tray icon and prints a
- * message each time it is clicked.
+ * traycon example – creates a blue circle tray icon with a context menu.
+ * Left-click toggles the colour; right-click opens the menu.
  */
 
 #define _DEFAULT_SOURCE  /* usleep */
@@ -21,6 +21,7 @@
 #endif
 
 static int click_count = 0;
+static int running = 1;
 
 static void on_click(traycon *tray, void *userdata)
 {
@@ -52,6 +53,30 @@ static void on_click(traycon *tray, void *userdata)
     }
     traycon_update_icon(tray, px, w, h);
     free(px);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Menu callback                                                      */
+/* ------------------------------------------------------------------ */
+
+enum { MENU_HELLO = 1, MENU_TOGGLE, MENU_QUIT };
+
+static void on_menu(traycon *tray, int item_id, void *userdata)
+{
+    (void)userdata;
+    switch (item_id) {
+    case MENU_HELLO:
+        printf("menu: Hello!\n");
+        break;
+    case MENU_TOGGLE:
+        printf("menu: Toggle colour\n");
+        on_click(tray, NULL);
+        break;
+    case MENU_QUIT:
+        printf("menu: Quit\n");
+        running = 0;
+        break;
+    }
 }
 
 int main(void)
@@ -87,7 +112,16 @@ int main(void)
 
     printf("Tray icon created.  Click it!  Press Ctrl-C to quit.\n");
 
-    for (;;) {
+    /* Set up a right-click context menu */
+    traycon_menu_item menu[] = {
+        { "Hello",          MENU_HELLO,  0 },
+        { "Toggle Colour",  MENU_TOGGLE, 0 },
+        { NULL,             0,           0 },           /* separator */
+        { "Quit",           MENU_QUIT,   0 },
+    };
+    traycon_set_menu(tray, menu, 4, on_menu, NULL);
+
+    while (running) {
         if (traycon_step(tray) < 0)
             break;
         SLEEP_MS(50);

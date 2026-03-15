@@ -20,12 +20,44 @@
 #include <string.h>
 
 /* ------------------------------------------------------------------ */
+/*  Internal menu helpers                                              */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    char *label;   /* heap copy; NULL = separator */
+    int   id;
+    int   flags;
+} traycon__menu_entry;
+
+static traycon__menu_entry *traycon__copy_menu(const traycon_menu_item *items,
+                                               int count)
+{
+    if (count <= 0 || !items) return NULL;
+    traycon__menu_entry *e = (traycon__menu_entry *)calloc(count, sizeof *e);
+    if (!e) return NULL;
+    for (int i = 0; i < count; i++) {
+        e[i].id    = items[i].id;
+        e[i].flags = items[i].flags;
+        e[i].label = items[i].label ? strdup(items[i].label) : NULL;
+    }
+    return e;
+}
+
+static void traycon__free_menu(traycon__menu_entry *e, int count)
+{
+    if (!e) return;
+    for (int i = 0; i < count; i++) free(e[i].label);
+    free(e);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Internal data                                                      */
 /* ------------------------------------------------------------------ */
 
 @interface TrayconClickHandler : NSObject
 @property (nonatomic, assign) traycon *tray_ptr;
 - (void)handleClick:(id)sender;
+- (void)handleMenuItem:(id)sender;
 @end
 
 struct traycon {
@@ -33,6 +65,13 @@ struct traycon {
     TrayconClickHandler *handler;
     traycon_click_cb     cb;
     void                *userdata;
+
+    /* context menu */
+    NSMenu              *ns_menu;
+    traycon__menu_entry *menu_items;
+    int                  menu_count;
+    traycon_menu_cb      menu_cb;
+    void                *menu_userdata;
 };
 
 /* ------------------------------------------------------------------ */
@@ -44,7 +83,27 @@ struct traycon {
 {
     (void)sender;
     traycon *t = self.tray_ptr;
-    if (t && t->cb) t->cb(t, t->userdata);
+    if (!t) return;
+
+    NSEvent *event = [NSApp currentEvent];
+    if (event.type == NSEventTypeRightMouseUp && t->ns_menu) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [t->item popUpStatusItemMenu:t->ns_menu];
+#pragma clang diagnostic pop
+        return;
+    }
+
+    if (t->cb) t->cb(t, t->userdata);
+}
+
+- (void)handleMenuItem:(id)sender
+{
+    NSMenuItem *mi = (NSMenuItem *)sender;
+    int index = (int)[mi tag];
+    traycon *t = self.tray_ptr;
+    if (t && t->menu_cb && index >= 0 && index < t->menu_count)
+        t->menu_cb(t, t->menu_items[index].id, t->menu_userdata);
 }
 @end
 
@@ -116,7 +175,8 @@ traycon *traycon_create(const unsigned char *rgba, int width, int height,
     tray->handler.tray_ptr    = tray;
     tray->item.button.target  = tray->handler;
     tray->item.button.action  = @selector(handleClick:);
-    [tray->item.button sendActionOn:NSEventMaskLeftMouseUp];
+    [tray->item.button sendActionOn:(NSEventMaskLeftMouseUp |
+                                     NSEventMaskRightMouseUp)];
 
     return tray;
 }
@@ -161,6 +221,8 @@ void traycon_destroy(traycon *tray)
         [[NSStatusBar systemStatusBar] removeStatusItem:tray->item];
     tray->item    = nil;
     tray->handler = nil;
+    tray->ns_menu = nil;
+    traycon__free_menu(tray->menu_items, tray->menu_count);
     free(tray);
 }
 
@@ -168,6 +230,45 @@ int traycon_set_visible(traycon *tray, int visible)
 {
     if (!tray || !tray->item) return -1;
     tray->item.visible = visible ? YES : NO;
+    return 0;
+}
+
+int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
+                     int count, traycon_menu_cb cb, void *userdata)
+{
+    if (!tray) return -1;
+
+    traycon__free_menu(tray->menu_items, tray->menu_count);
+    tray->menu_items    = traycon__copy_menu(items, count);
+    tray->menu_count    = (items && count > 0) ? count : 0;
+    tray->menu_cb       = cb;
+    tray->menu_userdata = userdata;
+
+    /* (Re)build the NSMenu */
+    tray->ns_menu = nil;
+    if (tray->menu_count > 0) {
+        NSMenu *menu = [[NSMenu alloc] init];
+        [menu setAutoenablesItems:NO];
+        for (int i = 0; i < tray->menu_count; i++) {
+            traycon__menu_entry *e = &tray->menu_items[i];
+            if (!e->label) {
+                [menu addItem:[NSMenuItem separatorItem]];
+            } else {
+                NSString *title = [NSString stringWithUTF8String:e->label];
+                NSMenuItem *mi = [[NSMenuItem alloc]
+                    initWithTitle:title
+                           action:@selector(handleMenuItem:)
+                    keyEquivalent:@""];
+                [mi setTarget:tray->handler];
+                [mi setTag:i];
+                [mi setEnabled:!(e->flags & TRAYCON_MENU_DISABLED)];
+                if (e->flags & TRAYCON_MENU_CHECKED)
+                    [mi setState:NSControlStateValueOn];
+                [menu addItem:mi];
+            }
+        }
+        tray->ns_menu = menu;
+    }
     return 0;
 }
 

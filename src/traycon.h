@@ -14,6 +14,23 @@ typedef struct traycon traycon;
 /* Called when the tray icon is left-clicked. */
 typedef void (*traycon_click_cb)(traycon *tray, void *userdata);
 
+/* Called when a context-menu item is selected. */
+typedef void (*traycon_menu_cb)(traycon *tray, int item_id, void *userdata);
+
+/* Menu item flags. */
+#define TRAYCON_MENU_DISABLED   (1 << 0)  /* item is grayed out       */
+#define TRAYCON_MENU_CHECKED    (1 << 1)  /* item shows a check mark  */
+
+/*
+ * Describes one entry in a context menu.
+ * Set label to NULL for a horizontal separator line.
+ */
+typedef struct traycon_menu_item {
+    const char *label;   /* display text; NULL = separator          */
+    int         id;      /* user-defined ID, passed back in the cb  */
+    int         flags;   /* combination of TRAYCON_MENU_* flags     */
+} traycon_menu_item;
+
 /*
  * Linux backend selection (no-op on macOS / Windows).
  *
@@ -70,6 +87,20 @@ void traycon_destroy(traycon *tray);
  * Returns 0 on success, -1 on failure.
  */
 int traycon_set_visible(traycon *tray, int visible);
+
+/*
+ * Set the right-click context menu for the tray icon.
+ *
+ * items    - array of menu items (copied internally; caller may free)
+ * count    - number of items in the array (0 to remove the menu)
+ * cb       - called when an item is selected (may be NULL)
+ * userdata - forwarded to cb
+ *
+ * Pass items=NULL and count=0 to remove the menu.
+ * Returns 0 on success, -1 on failure.
+ */
+int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
+                     int count, traycon_menu_cb cb, void *userdata);
 
 #ifdef __cplusplus
 }
