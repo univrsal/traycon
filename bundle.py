@@ -26,12 +26,11 @@ OUTPUT = os.path.join(SCRIPT_DIR, "traycon.h")
 HEADER = os.path.join(SRC_DIR, "traycon.h")
 
 # (filename, platform_guard)
-# Files that already contain their own #ifdef guard use None;
-# files without one get wrapped with the given guard here.
+# Each file is wrapped with the given platform guard by this script.
 IMPL_FILES = [
     (os.path.join(SRC_DIR, "traycon_linux.c"),  "__linux__"),
-    (os.path.join(SRC_DIR, "traycon_win32.c"),  None),
-    (os.path.join(SRC_DIR, "traycon_macos.m"),  None),
+    (os.path.join(SRC_DIR, "traycon_win32.c"),  "_WIN32"),
+    (os.path.join(SRC_DIR, "traycon_macos.m"),  "__APPLE__"),
 ]
 
 

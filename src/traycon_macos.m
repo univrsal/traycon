@@ -13,8 +13,6 @@
 
 #include "traycon.h"
 
-#ifdef __APPLE__
-
 #import <Cocoa/Cocoa.h>
 #include <stdlib.h>
 #include <string.h>
@@ -273,5 +271,3 @@ int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
 }
 
 void traycon_set_preferred_backend(int backend) { (void)backend; }
-
-#endif /* __APPLE__ */

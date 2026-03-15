@@ -7,8 +7,6 @@
 
 #include "traycon.h"
 
-#ifdef _WIN32
-
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -331,5 +329,3 @@ int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
 }
 
 void traycon_set_preferred_backend(int backend) { (void)backend; }
-
-#endif /* _WIN32 */
