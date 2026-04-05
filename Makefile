@@ -14,6 +14,9 @@ ifeq ($(UNAME),Linux)
   # To disable a backend at compile time:
   #   make EXTRA_CFLAGS=-DTRAYCON_NO_SNI   (X11 only, no libdbus dependency)
   #   make EXTRA_CFLAGS=-DTRAYCON_NO_X11   (SNI only, no libX11 dependency)
+  # To also disable desktop notifications (removes libdbus dependency
+  # when combined with TRAYCON_NO_SNI):
+  #   make EXTRA_CFLAGS="-DTRAYCON_NO_SNI -DTRAYCON_NO_NOTIFICATIONS"
   PLATFORM_CFLAGS += $(EXTRA_CFLAGS)
 else ifneq ($(filter FreeBSD OpenBSD NetBSD DragonFly,$(UNAME)),)
   # BSD systems: same backends as Linux; pkg-config names are identical.
@@ -23,12 +26,13 @@ else ifneq ($(filter FreeBSD OpenBSD NetBSD DragonFly,$(UNAME)),)
   X11_LIBS    := $(shell pkg-config --libs   x11 2>/dev/null)
   PLATFORM_CFLAGS = $(DBUS_CFLAGS) $(X11_CFLAGS)
   PLATFORM_LIBS   = $(DBUS_LIBS) $(X11_LIBS)
+  # Same EXTRA_CFLAGS options as Linux above.
   PLATFORM_CFLAGS += $(EXTRA_CFLAGS)
 else ifeq ($(UNAME),Darwin)
   # Compile as Objective-C so the AppKit implementation in the bundled
   # header is accepted by the compiler.
   PLATFORM_CFLAGS = -x objective-c
-  PLATFORM_LIBS   = -framework Cocoa
+  PLATFORM_LIBS   = -framework Cocoa -framework UserNotifications
 else ifeq ($(OS),Windows_NT)
   PLATFORM_CFLAGS =
   PLATFORM_LIBS   = -lshell32 -luser32 -lgdi32

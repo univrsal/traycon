@@ -23,6 +23,7 @@ Features:
 - Callback for left clicking
 - Hide/show icon
 - Simple right-click menu with separators, no nested sub-menus
+- Desktop notifications with optional action buttons
 
 ## Usage
 
@@ -76,12 +77,61 @@ int traycon_set_visible(traycon* tray, int visible);
 int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
                      int count, traycon_menu_cb cb, void *userdata);
 
+// Show a desktop notification with optional action buttons.
+// Returns 0 on success, -1 on failure.
+int traycon_notify(traycon *tray, const char *title, const char *body,
+                   const traycon_notification_action *actions, int count,
+                   traycon_notification_cb cb, void *userdata);
+
+// Dismiss the currently showing notification.
+// Returns 0 on success, -1 on failure.
+int traycon_dismiss_notification(traycon *tray);
+
 // Linux only: choose backend before traycon_create().
 // TRAYCON_BACKEND_AUTO (0) – try SNI, fall back to X11 (default)
 // TRAYCON_BACKEND_SNI  (1) – D-Bus StatusNotifierItem only
 // TRAYCON_BACKEND_X11  (2) – XEmbed system tray only
 // No-op on macOS / Windows.
 void traycon_set_preferred_backend(int backend);
+```
+
+### Notifications
+
+`traycon_notify()` shows a desktop notification attached to the tray icon.
+Action buttons are supported on Linux/BSD and macOS; on Windows, only a
+balloon-tip click (reported as `"default"`) is available.
+
+```c
+traycon_notification_action actions[] = {
+    { "open",    "Open"    },
+    { "dismiss", "Dismiss" },
+};
+traycon_notify(tray, "Title", "Body text",
+               actions, 2, on_notification, NULL);
+```
+
+The callback receives the action ID string when the user interacts:
+
+```c
+void on_notification(traycon *tray, const char *action_id, void *userdata)
+{
+    printf("notification action: %s\n", action_id);
+}
+```
+
+Platform notes:
+
+| Platform    | Mechanism                                     | Action buttons |
+| ----------- | --------------------------------------------- | -------------- |
+| Linux / BSD | `org.freedesktop.Notifications` (D-Bus)       | Yes            |
+| macOS       | `UNUserNotificationCenter` (10.14+)           | Yes            |
+| Windows     | `Shell_NotifyIcon` balloon tips               | No (click only)|
+
+To disable notifications on Linux/BSD (removes the `libdbus-1` dependency
+when combined with `TRAYCON_NO_SNI`):
+
+```sh
+make EXTRA_CFLAGS="-DTRAYCON_NO_SNI -DTRAYCON_NO_NOTIFICATIONS"
 ```
 
 The icon data is raw **RGBA**, row-major, top-left origin. Recommended
@@ -110,7 +160,14 @@ static void on_click(traycon *tray, void *userdata)
     printf("clicked!\n");
 }
 
-enum { MENU_HELLO = 1, MENU_TOGGLE, MENU_QUIT };
+static void on_notification(traycon *tray, const char *action_id,
+                            void *userdata)
+{
+    (void)tray; (void)userdata;
+    printf("notification action: %s\n", action_id);
+}
+
+enum { MENU_HELLO = 1, MENU_TOGGLE, MENU_NOTIFY, MENU_QUIT };
 static int running = 1;
 
 static void on_menu(traycon *tray, int item_id, void *userdata)
@@ -124,6 +181,14 @@ static void on_menu(traycon *tray, int item_id, void *userdata)
         printf("menu: Toggle color\n");
         on_click(tray, NULL);
         break;
+    case MENU_NOTIFY: {
+        traycon_notification_action actions[] = {
+            { "open", "Open" }, { "dismiss", "Dismiss" },
+        };
+        traycon_notify(tray, "traycon", "Hello from traycon!",
+                       actions, 2, on_notification, NULL);
+        break;
+    }
     case MENU_QUIT:
         printf("menu: Quit\n");
         running = 0;
@@ -153,12 +218,13 @@ int main(void)
     if (!tray) { fprintf(stderr, "failed\n"); return 1; }
 
     traycon_menu_item menu[] = {
-        { "Hello",          MENU_HELLO,  0 },
-        { "Toggle Color",   MENU_TOGGLE, 0 },
-        { NULL,             0,           0 },           /* separator */
-        { "Quit",           MENU_QUIT,   0 },
+        { "Hello",             MENU_HELLO,  0 },
+        { "Toggle Color",      MENU_TOGGLE, 0 },
+        { "Send Notification", MENU_NOTIFY, 0 },
+        { NULL,                0,           0 },           /* separator */
+        { "Quit",              MENU_QUIT,   0 },
     };
-    traycon_set_menu(tray, menu, 4, on_menu, NULL);
+    traycon_set_menu(tray, menu, 5, on_menu, NULL);
 
     printf("Click the tray icon.  Ctrl-C to quit.\n");
 

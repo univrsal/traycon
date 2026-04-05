@@ -24,8 +24,15 @@
 #include <string.h>
 #include <unistd.h>
 
-#ifndef TRAYCON_NO_SNI
+/*
+ * D-Bus is needed for:
+ *   - SNI backend (StatusNotifierItem)
+ *   - Desktop notifications (org.freedesktop.Notifications)
+ * Include it when any of these features are enabled.
+ */
+#if !defined(TRAYCON_NO_SNI) || !defined(TRAYCON_NO_NOTIFICATIONS)
 #include <dbus/dbus.h>
+#define TRAYCON_HAS_DBUS 1
 #endif
 
 #ifndef TRAYCON_NO_X11
@@ -101,8 +108,22 @@ struct traycon {
     void                *menu_userdata;
     unsigned int         menu_revision;  /* for dbusmenu LayoutUpdated */
 
+#ifndef TRAYCON_NO_NOTIFICATIONS
+#ifdef TRAYCON_HAS_DBUS
+    /* notification (D-Bus org.freedesktop.Notifications) ------------ */
+    DBusConnection          *notify_conn;
+    unsigned int             notify_id;
+    traycon_notification_cb  notify_cb;
+    void                    *notify_userdata;
+    char                   **notify_action_ids;
+    int                      notify_action_count;
+    int                      notify_filter_added;
+#endif
+#endif
+
     /* backend-specific (only one active at a time) ------------------ */
     union {
+#ifdef TRAYCON_HAS_DBUS
 #ifndef TRAYCON_NO_SNI
         struct {
             DBusConnection  *conn;
@@ -112,7 +133,8 @@ struct traycon {
             int              icon_len;    /* icon_w * icon_h * 4       */
             char             bus_name[128];
         } sni;
-#endif
+#endif /* !TRAYCON_NO_SNI */
+#endif /* TRAYCON_HAS_DBUS */
 #ifndef TRAYCON_NO_X11
         struct {
             Display         *dpy;
@@ -157,6 +179,7 @@ struct traycon {
 /* ================================================================== */
 
 #ifndef TRAYCON_NO_SNI
+/* TRAYCON_HAS_DBUS is guaranteed here */
 
 static int sni_id_counter = 0;
 
@@ -1881,6 +1904,112 @@ static int x11_set_menu(traycon *tray, const traycon_menu_item *items,
 
 /* ================================================================== */
 /*                                                                      */
+/*  DESKTOP NOTIFICATIONS (org.freedesktop.Notifications via D-Bus)     */
+/*                                                                      */
+/* ================================================================== */
+
+#ifndef TRAYCON_NO_NOTIFICATIONS
+#ifdef TRAYCON_HAS_DBUS
+
+static void traycon__notify_cleanup(traycon *tray)
+{
+    if (tray->notify_action_ids) {
+        for (int i = 0; i < tray->notify_action_count; i++)
+            free(tray->notify_action_ids[i]);
+        free(tray->notify_action_ids);
+        tray->notify_action_ids = NULL;
+    }
+    tray->notify_action_count = 0;
+    tray->notify_cb       = NULL;
+    tray->notify_userdata = NULL;
+    tray->notify_id       = 0;
+}
+
+static DBusHandlerResult
+traycon__notify_filter(DBusConnection *conn, DBusMessage *msg, void *data)
+{
+    (void)conn;
+    traycon *tray = (traycon *)data;
+
+    if (dbus_message_is_signal(msg,
+            "org.freedesktop.Notifications", "ActionInvoked")) {
+        dbus_uint32_t id = 0;
+        const char *action = NULL;
+        if (dbus_message_get_args(msg, NULL,
+                DBUS_TYPE_UINT32, &id,
+                DBUS_TYPE_STRING, &action,
+                DBUS_TYPE_INVALID) &&
+            id == (dbus_uint32_t)tray->notify_id && tray->notify_cb) {
+            tray->notify_cb(tray, action, tray->notify_userdata);
+            tray->notify_id = 0;
+        }
+        return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+    }
+
+    if (dbus_message_is_signal(msg,
+            "org.freedesktop.Notifications", "NotificationClosed")) {
+        dbus_uint32_t id = 0;
+        if (dbus_message_get_args(msg, NULL,
+                DBUS_TYPE_UINT32, &id,
+                DBUS_TYPE_INVALID) &&
+            id == (dbus_uint32_t)tray->notify_id) {
+            tray->notify_id = 0;
+        }
+        return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+    }
+
+    return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+}
+
+static void traycon__notify_destroy(traycon *tray)
+{
+    if (tray->notify_conn) {
+        if (tray->notify_filter_added) {
+            dbus_connection_remove_filter(tray->notify_conn,
+                                          traycon__notify_filter, tray);
+            tray->notify_filter_added = 0;
+        }
+        dbus_connection_unref(tray->notify_conn);
+        tray->notify_conn = NULL;
+    }
+    traycon__notify_cleanup(tray);
+}
+
+static int traycon__notify_ensure_conn(traycon *tray)
+{
+    if (tray->notify_conn) return 0;
+
+    DBusError err;
+    dbus_error_init(&err);
+    tray->notify_conn = dbus_bus_get(DBUS_BUS_SESSION, &err);
+    if (dbus_error_is_set(&err) || !tray->notify_conn) {
+        fprintf(stderr, "traycon: D-Bus connection for notifications failed: %s\n",
+                dbus_error_is_set(&err) ? err.message : "unknown");
+        dbus_error_free(&err);
+        tray->notify_conn = NULL;
+        return -1;
+    }
+
+    /* Match rules for notification signals */
+    dbus_bus_add_match(tray->notify_conn,
+        "type='signal',interface='org.freedesktop.Notifications',"
+        "member='ActionInvoked'", NULL);
+    dbus_bus_add_match(tray->notify_conn,
+        "type='signal',interface='org.freedesktop.Notifications',"
+        "member='NotificationClosed'", NULL);
+
+    dbus_connection_add_filter(tray->notify_conn,
+                               traycon__notify_filter, tray, NULL);
+    tray->notify_filter_added = 1;
+
+    return 0;
+}
+
+#endif /* TRAYCON_HAS_DBUS */
+#endif /* !TRAYCON_NO_NOTIFICATIONS */
+
+/* ================================================================== */
+/*                                                                      */
 /*  PUBLIC API – auto-detection and dispatch                            */
 /*                                                                      */
 /* ================================================================== */
@@ -1937,12 +2066,33 @@ int traycon_update_icon(traycon *tray, const unsigned char *rgba,
 int traycon_step(traycon *tray)
 {
     if (!tray) return -1;
-    return tray->fn_step(tray);
+    int ret = tray->fn_step(tray);
+
+#ifndef TRAYCON_NO_NOTIFICATIONS
+#ifdef TRAYCON_HAS_DBUS
+    /* Process notification D-Bus events.
+     * For SNI, sni_step() already dispatches the same shared connection,
+     * so this is redundant but harmless.  For X11, this is essential. */
+    if (tray->notify_conn) {
+        dbus_connection_read_write(tray->notify_conn, 0);
+        while (dbus_connection_dispatch(tray->notify_conn) ==
+               DBUS_DISPATCH_DATA_REMAINS)
+            ;
+    }
+#endif
+#endif
+
+    return ret;
 }
 
 void traycon_destroy(traycon *tray)
 {
     if (!tray) return;
+#ifndef TRAYCON_NO_NOTIFICATIONS
+#ifdef TRAYCON_HAS_DBUS
+    traycon__notify_destroy(tray);
+#endif
+#endif
     tray->fn_destroy(tray);
     free(tray);
 }
@@ -1962,3 +2112,175 @@ int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
     if (!tray->fn_set_menu) return -1;
     return tray->fn_set_menu(tray, items, count, cb, userdata);
 }
+
+/* ------------------------------------------------------------------ */
+/*  Notification API                                                   */
+/* ------------------------------------------------------------------ */
+
+#ifndef TRAYCON_NO_NOTIFICATIONS
+#ifdef TRAYCON_HAS_DBUS
+
+int traycon_notify(traycon *tray, const char *title, const char *body,
+                   const traycon_notification_action *actions, int count,
+                   traycon_notification_cb cb, void *userdata)
+{
+    if (!tray || !title) return -1;
+
+    if (traycon__notify_ensure_conn(tray) < 0)
+        return -1;
+
+    /* Clean up previous notification state */
+    traycon__notify_cleanup(tray);
+
+    /* Store callback and action IDs */
+    tray->notify_cb       = cb;
+    tray->notify_userdata = userdata;
+    if (actions && count > 0) {
+        tray->notify_action_ids = (char **)calloc((size_t)count,
+                                                   sizeof(char *));
+        if (tray->notify_action_ids) {
+            for (int i = 0; i < count; i++)
+                tray->notify_action_ids[i] = strdup(actions[i].id);
+            tray->notify_action_count = count;
+        }
+    }
+
+    /* Build the Notify method call:
+     * Notify(app_name, replaces_id, app_icon, summary, body,
+     *        actions[], hints{}, expire_timeout) -> uint32 */
+    DBusMessage *msg = dbus_message_new_method_call(
+        "org.freedesktop.Notifications",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+        "Notify");
+    if (!msg) return -1;
+
+    DBusMessageIter iter;
+    dbus_message_iter_init_append(msg, &iter);
+
+    const char *app_name = "traycon";
+    dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &app_name);
+
+    dbus_uint32_t replaces_id = 0;
+    dbus_message_iter_append_basic(&iter, DBUS_TYPE_UINT32, &replaces_id);
+
+    const char *app_icon = "";
+    dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &app_icon);
+
+    dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &title);
+
+    const char *body_str = body ? body : "";
+    dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &body_str);
+
+    /* Actions: array of strings [id1, label1, id2, label2, ...] */
+    DBusMessageIter actions_arr;
+    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY,
+                                     "s", &actions_arr);
+    if (actions && count > 0) {
+        for (int i = 0; i < count; i++) {
+            const char *aid = actions[i].id ? actions[i].id : "";
+            const char *alabel = actions[i].label ? actions[i].label : "";
+            dbus_message_iter_append_basic(&actions_arr,
+                                           DBUS_TYPE_STRING, &aid);
+            dbus_message_iter_append_basic(&actions_arr,
+                                           DBUS_TYPE_STRING, &alabel);
+        }
+    }
+    dbus_message_iter_close_container(&iter, &actions_arr);
+
+    /* Hints: empty dict */
+    DBusMessageIter hints_dict;
+    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY,
+                                     "{sv}", &hints_dict);
+    dbus_message_iter_close_container(&iter, &hints_dict);
+
+    /* Expire timeout: -1 = server default */
+    dbus_int32_t expire_timeout = -1;
+    dbus_message_iter_append_basic(&iter, DBUS_TYPE_INT32, &expire_timeout);
+
+    /* Send and get reply (blocking, short timeout) */
+    DBusError err;
+    dbus_error_init(&err);
+    DBusMessage *reply = dbus_connection_send_with_reply_and_block(
+        tray->notify_conn, msg, 5000, &err);
+    dbus_message_unref(msg);
+
+    if (dbus_error_is_set(&err) || !reply) {
+        fprintf(stderr, "traycon: Notify call failed: %s\n",
+                dbus_error_is_set(&err) ? err.message : "no reply");
+        dbus_error_free(&err);
+        return -1;
+    }
+
+    /* Extract the notification ID from the reply */
+    dbus_uint32_t nid = 0;
+    dbus_message_get_args(reply, NULL,
+        DBUS_TYPE_UINT32, &nid, DBUS_TYPE_INVALID);
+    dbus_message_unref(reply);
+
+    tray->notify_id = (unsigned int)nid;
+    return 0;
+}
+
+int traycon_dismiss_notification(traycon *tray)
+{
+    if (!tray || !tray->notify_conn || tray->notify_id == 0)
+        return -1;
+
+    DBusMessage *msg = dbus_message_new_method_call(
+        "org.freedesktop.Notifications",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+        "CloseNotification");
+    if (!msg) return -1;
+
+    dbus_uint32_t nid = (dbus_uint32_t)tray->notify_id;
+    dbus_message_append_args(msg,
+        DBUS_TYPE_UINT32, &nid, DBUS_TYPE_INVALID);
+
+    dbus_connection_send(tray->notify_conn, msg, NULL);
+    dbus_message_unref(msg);
+    dbus_connection_flush(tray->notify_conn);
+
+    tray->notify_id = 0;
+    return 0;
+}
+
+#else /* no D-Bus available */
+
+int traycon_notify(traycon *tray, const char *title, const char *body,
+                   const traycon_notification_action *actions, int count,
+                   traycon_notification_cb cb, void *userdata)
+{
+    (void)tray; (void)title; (void)body;
+    (void)actions; (void)count; (void)cb; (void)userdata;
+    return -1;
+}
+
+int traycon_dismiss_notification(traycon *tray)
+{
+    (void)tray;
+    return -1;
+}
+
+#endif /* TRAYCON_HAS_DBUS */
+
+#else /* TRAYCON_NO_NOTIFICATIONS */
+
+int traycon_notify(traycon *tray, const char *title, const char *body,
+                   const traycon_notification_action *actions, int count,
+                   traycon_notification_cb cb, void *userdata)
+{
+    (void)tray; (void)title; (void)body;
+    (void)actions; (void)count; (void)cb; (void)userdata;
+    return -1;
+}
+
+int traycon_dismiss_notification(traycon *tray)
+{
+    (void)tray;
+    return -1;
+}
+
+#endif /* !TRAYCON_NO_NOTIFICATIONS */
+

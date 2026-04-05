@@ -66,6 +66,11 @@ struct traycon {
     int                  menu_count;
     traycon_menu_cb      menu_cb;
     void                *menu_userdata;
+
+    /* notification */
+    traycon_notification_cb  notify_cb;
+    void                    *notify_userdata;
+    char                    *notify_default_action; /* first action ID */
 };
 
 static const wchar_t CLASS_NAME[] = L"traycon_wnd";
@@ -144,6 +149,18 @@ wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         /* lParam = mouse message (uVersion 0) */
         if (lp == WM_LBUTTONUP) {
             if (tray->cb) tray->cb(tray, tray->userdata);
+        }
+        if (lp == NIN_BALLOONUSERCLICK) {
+            if (tray->notify_cb) {
+                const char *action = tray->notify_default_action
+                                     ? tray->notify_default_action
+                                     : "default";
+                tray->notify_cb(tray, action, tray->notify_userdata);
+            }
+            free(tray->notify_default_action);
+            tray->notify_default_action = NULL;
+            tray->notify_cb       = NULL;
+            tray->notify_userdata = NULL;
         }
         if (lp == WM_RBUTTONUP && tray->menu_items && tray->menu_count > 0) {
             /* Build and show popup menu */
@@ -295,6 +312,7 @@ void traycon_destroy(traycon *tray)
     if (tray->hicon) DestroyIcon(tray->hicon);
     if (tray->hwnd)  DestroyWindow(tray->hwnd);
     traycon__free_menu(tray->menu_items, tray->menu_count);
+    free(tray->notify_default_action);
     free(tray);
 }
 
@@ -329,3 +347,48 @@ int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
 }
 
 void traycon_set_preferred_backend(int backend) { (void)backend; }
+
+int traycon_notify(traycon *tray, const char *title, const char *body,
+                   const traycon_notification_action *actions, int count,
+                   traycon_notification_cb cb, void *userdata)
+{
+    if (!tray || !title) return -1;
+
+    /* Store callback state */
+    tray->notify_cb       = cb;
+    tray->notify_userdata = userdata;
+    free(tray->notify_default_action);
+    tray->notify_default_action = NULL;
+    if (actions && count > 0 && actions[0].id)
+        tray->notify_default_action = _strdup(actions[0].id);
+
+    /* Convert title to wide string (szInfoTitle max 63 chars + NUL) */
+    MultiByteToWideChar(CP_UTF8, 0, title, -1,
+                        tray->nid.szInfoTitle,
+                        sizeof(tray->nid.szInfoTitle) /
+                            sizeof(tray->nid.szInfoTitle[0]));
+
+    /* Convert body to wide string (szInfo max 255 chars + NUL) */
+    const char *body_str = body ? body : "";
+    MultiByteToWideChar(CP_UTF8, 0, body_str, -1,
+                        tray->nid.szInfo,
+                        sizeof(tray->nid.szInfo) /
+                            sizeof(tray->nid.szInfo[0]));
+
+    tray->nid.uFlags     = NIF_INFO;
+    tray->nid.dwInfoFlags = NIIF_NONE;
+
+    return Shell_NotifyIconW(NIM_MODIFY, &tray->nid) ? 0 : -1;
+}
+
+int traycon_dismiss_notification(traycon *tray)
+{
+    if (!tray) return -1;
+
+    tray->nid.uFlags = NIF_INFO;
+    tray->nid.szInfoTitle[0] = L'\0';
+    tray->nid.szInfo[0]      = L'\0';
+
+    return Shell_NotifyIconW(NIM_MODIFY, &tray->nid) ? 0 : -1;
+}
+

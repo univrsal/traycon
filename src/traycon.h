@@ -17,6 +17,22 @@ typedef void (*traycon_click_cb)(traycon *tray, void *userdata);
 /* Called when a context-menu item is selected. */
 typedef void (*traycon_menu_cb)(traycon *tray, int item_id, void *userdata);
 
+/*
+ * Called when the user interacts with a desktop notification.
+ *
+ * action_id - the id string of the action/button that was clicked, or
+ *             "default" if the notification body itself was clicked.
+ */
+typedef void (*traycon_notification_cb)(traycon *tray,
+                                        const char *action_id,
+                                        void *userdata);
+
+/* Describes one button in a desktop notification. */
+typedef struct traycon_notification_action {
+    const char *id;      /* action identifier, returned in the callback */
+    const char *label;   /* button text displayed to the user           */
+} traycon_notification_action;
+
 /* Menu item flags. */
 #define TRAYCON_MENU_DISABLED   (1 << 0)  /* item is grayed out       */
 #define TRAYCON_MENU_CHECKED    (1 << 1)  /* item shows a check mark  */
@@ -101,6 +117,43 @@ int traycon_set_visible(traycon *tray, int visible);
  */
 int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
                      int count, traycon_menu_cb cb, void *userdata);
+
+/*
+ * Show a desktop notification with optional action buttons.
+ *
+ * title    - notification title (required, UTF-8)
+ * body     - notification body text (may be NULL, UTF-8)
+ * actions  - array of action buttons (may be NULL; copied internally)
+ * count    - number of actions (0 for no buttons)
+ * cb       - called when an action button is clicked (may be NULL)
+ * userdata - forwarded to cb
+ *
+ * Only one notification at a time is tracked per tray icon.
+ * Calling again replaces the pending notification's callback state.
+ *
+ * Platform notes:
+ *   Linux/BSD – uses org.freedesktop.Notifications (D-Bus); actions
+ *               appear as buttons if the notification server supports
+ *               them.  Requires libdbus-1; disabled when compiled with
+ *               TRAYCON_NO_SNI unless D-Bus is otherwise available.
+ *   macOS     – uses UNUserNotificationCenter (10.14+); actions appear
+ *               as notification buttons.  The first call may trigger a
+ *               system authorisation dialog.
+ *   Windows   – uses Shell_NotifyIcon balloon tips; action buttons are
+ *               NOT supported. The callback fires with "default" when
+ *               the user clicks the balloon.
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+int traycon_notify(traycon *tray, const char *title, const char *body,
+                   const traycon_notification_action *actions, int count,
+                   traycon_notification_cb cb, void *userdata);
+
+/*
+ * Dismiss any currently showing notification.
+ * Returns 0 on success, -1 on failure or if no notification is active.
+ */
+int traycon_dismiss_notification(traycon *tray);
 
 #ifdef __cplusplus
 }

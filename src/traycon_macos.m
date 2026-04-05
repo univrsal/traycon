@@ -14,6 +14,7 @@
 #include "traycon.h"
 
 #import <Cocoa/Cocoa.h>
+#import <UserNotifications/UserNotifications.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -52,7 +53,7 @@ static void traycon__free_menu(traycon__menu_entry *e, int count)
 /*  Internal data                                                      */
 /* ------------------------------------------------------------------ */
 
-@interface TrayconClickHandler : NSObject
+@interface TrayconClickHandler : NSObject <UNUserNotificationCenterDelegate>
 @property (nonatomic, assign) traycon *tray_ptr;
 - (void)handleClick:(id)sender;
 - (void)handleMenuItem:(id)sender;
@@ -70,6 +71,11 @@ struct traycon {
     int                  menu_count;
     traycon_menu_cb      menu_cb;
     void                *menu_userdata;
+
+    /* notification */
+    traycon_notification_cb  notify_cb;
+    void                    *notify_userdata;
+    int                      notify_auth_requested;
 };
 
 /* ------------------------------------------------------------------ */
@@ -103,6 +109,42 @@ struct traycon {
     if (t && t->menu_cb && index >= 0 && index < t->menu_count)
         t->menu_cb(t, t->menu_items[index].id, t->menu_userdata);
 }
+
+/* ---- UNUserNotificationCenterDelegate ---- */
+
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       didReceiveNotificationResponse:(UNNotificationResponse *)response
+                 withCompletionHandler:(void (^)(void))completionHandler
+    API_AVAILABLE(macos(10.14))
+{
+    (void)center;
+    traycon *t = self.tray_ptr;
+    if (t && t->notify_cb) {
+        NSString *actionId = response.actionIdentifier;
+        if ([actionId isEqualToString:UNNotificationDefaultActionIdentifier]) {
+            t->notify_cb(t, "default", t->notify_userdata);
+        } else if (![actionId isEqualToString:UNNotificationDismissActionIdentifier]) {
+            t->notify_cb(t, [actionId UTF8String], t->notify_userdata);
+        }
+    }
+    completionHandler();
+}
+
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       willPresentNotification:(UNNotification *)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler
+    API_AVAILABLE(macos(10.14))
+{
+    (void)center;
+    (void)notification;
+    /* Show the notification even when the app is in the foreground. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    completionHandler(UNNotificationPresentationOptionAlert |
+                      UNNotificationPresentationOptionSound);
+#pragma clang diagnostic pop
+}
+
 @end
 
 /* ------------------------------------------------------------------ */
@@ -215,6 +257,15 @@ int traycon_step(traycon *tray)
 void traycon_destroy(traycon *tray)
 {
     if (!tray) return;
+    /* Remove notification delegate */
+    if (@available(macOS 10.14, *)) {
+        UNUserNotificationCenter *center =
+            [UNUserNotificationCenter currentNotificationCenter];
+        if (center.delegate == (id)tray->handler)
+            center.delegate = nil;
+        [center removeDeliveredNotificationsWithIdentifiers:
+            @[@"traycon_notification"]];
+    }
     if (tray->item)
         [[NSStatusBar systemStatusBar] removeStatusItem:tray->item];
     tray->item    = nil;
@@ -271,3 +322,112 @@ int traycon_set_menu(traycon *tray, const traycon_menu_item *items,
 }
 
 void traycon_set_preferred_backend(int backend) { (void)backend; }
+
+int traycon_notify(traycon *tray, const char *title, const char *body,
+                   const traycon_notification_action *actions, int count,
+                   traycon_notification_cb cb, void *userdata)
+{
+    if (!tray || !title) return -1;
+
+    if (@available(macOS 10.14, *)) {
+        UNUserNotificationCenter *center =
+            [UNUserNotificationCenter currentNotificationCenter];
+        center.delegate = tray->handler;
+
+        /* Request authorisation on first call (non-blocking).
+         * The system shows a dialog; the first notification may be
+         * silently dropped if the user hasn't responded yet. */
+        if (!tray->notify_auth_requested) {
+            tray->notify_auth_requested = 1;
+            [center requestAuthorizationWithOptions:
+                (UNAuthorizationOptionAlert | UNAuthorizationOptionSound)
+                                  completionHandler:^(BOOL granted,
+                                                      NSError *error) {
+                (void)granted; (void)error;
+            }];
+        }
+
+        /* Store callback */
+        tray->notify_cb       = cb;
+        tray->notify_userdata = userdata;
+
+        /* Build content */
+        UNMutableNotificationContent *content =
+            [[UNMutableNotificationContent alloc] init];
+        content.title = [NSString stringWithUTF8String:title];
+        if (body)
+            content.body = [NSString stringWithUTF8String:body];
+        content.sound = [UNNotificationSound defaultSound];
+
+        /* Build category with action buttons */
+        NSString *categoryId =
+            [NSString stringWithFormat:@"traycon_cat_%u", arc4random()];
+
+        if (actions && count > 0) {
+            NSMutableArray<UNNotificationAction *> *nsActions =
+                [NSMutableArray array];
+            for (int i = 0; i < count; i++) {
+                NSString *aid =
+                    [NSString stringWithUTF8String:
+                        actions[i].id ? actions[i].id : ""];
+                NSString *alabel =
+                    [NSString stringWithUTF8String:
+                        actions[i].label ? actions[i].label : ""];
+                UNNotificationAction *action = [UNNotificationAction
+                    actionWithIdentifier:aid
+                                   title:alabel
+                                 options:UNNotificationActionOptionForeground];
+                [nsActions addObject:action];
+            }
+
+            UNNotificationCategory *category = [UNNotificationCategory
+                categoryWithIdentifier:categoryId
+                               actions:nsActions
+                     intentIdentifiers:@[]
+                               options:UNNotificationCategoryOptionNone];
+
+            [center setNotificationCategories:
+                [NSSet setWithObject:category]];
+            content.categoryIdentifier = categoryId;
+        }
+
+        /* Create and submit the request */
+        UNNotificationRequest *request = [UNNotificationRequest
+            requestWithIdentifier:@"traycon_notification"
+                          content:content
+                          trigger:nil];   /* immediate delivery */
+
+        __block BOOL success = NO;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        [center addNotificationRequest:request
+                 withCompletionHandler:^(NSError *error) {
+            success = (error == nil);
+            if (error)
+                fprintf(stderr, "traycon: notification error: %s\n",
+                        [[error localizedDescription] UTF8String]);
+            dispatch_semaphore_signal(sem);
+        }];
+        dispatch_semaphore_wait(sem,
+            dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+
+        return success ? 0 : -1;
+    }
+
+    /* macOS < 10.14: UNUserNotificationCenter not available */
+    return -1;
+}
+
+int traycon_dismiss_notification(traycon *tray)
+{
+    if (!tray) return -1;
+
+    if (@available(macOS 10.14, *)) {
+        [[UNUserNotificationCenter currentNotificationCenter]
+            removeDeliveredNotificationsWithIdentifiers:
+                @[@"traycon_notification"]];
+        return 0;
+    }
+
+    return -1;
+}
+
