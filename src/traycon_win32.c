@@ -12,6 +12,7 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -75,6 +76,30 @@ struct traycon {
 
 static const wchar_t CLASS_NAME[] = L"traycon_wnd";
 static int class_registered = 0;
+
+/*
+ * Return the correct cbSize for NOTIFYICONDATAW based on the running
+ * Windows version.  Pre-Vista shells reject the struct if cbSize is
+ * larger than what they know about, so on XP/2000 we use the V2 size
+ * (which already includes the balloon-tip fields we need).
+ */
+#ifndef NOTIFYICONDATAW_V2_SIZE
+#define NOTIFYICONDATAW_V2_SIZE  offsetof(NOTIFYICONDATAW, guidItem)
+#endif
+
+static DWORD traycon__nid_size(void)
+{
+    OSVERSIONINFOW ovi;
+    memset(&ovi, 0, sizeof ovi);
+    ovi.dwOSVersionInfoSize = sizeof ovi;
+#pragma warning(push)
+#pragma warning(disable: 4996) /* GetVersionExW deprecated on 8.1+ */
+    GetVersionExW(&ovi);
+#pragma warning(pop)
+    return ovi.dwMajorVersion >= 6
+         ? (DWORD)sizeof(NOTIFYICONDATAW)
+         : (DWORD)NOTIFYICONDATAW_V2_SIZE;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Create HICON from RGBA pixel data                                  */
@@ -259,7 +284,7 @@ traycon *traycon_create(const unsigned char *rgba, int width, int height,
 
     /* Shell notification */
     memset(&tray->nid, 0, sizeof tray->nid);
-    tray->nid.cbSize           = sizeof tray->nid;
+    tray->nid.cbSize           = traycon__nid_size();
     tray->nid.hWnd             = tray->hwnd;
     tray->nid.uID              = TRAY_ICON_ID;
     tray->nid.uFlags           = NIF_ICON | NIF_MESSAGE;
