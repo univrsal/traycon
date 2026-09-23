@@ -107,22 +107,18 @@ static DWORD traycon__nid_size(void)
 
 static HICON icon_from_rgba(const unsigned char *rgba, int w, int h)
 {
-    BITMAPV5HEADER bi;
-    memset(&bi, 0, sizeof bi);
-    bi.bV5Size        = sizeof bi;
-    bi.bV5Width       = w;
-    bi.bV5Height      = -h;          /* top-down */
-    bi.bV5Planes      = 1;
-    bi.bV5BitCount    = 32;
-    bi.bV5Compression = BI_BITFIELDS;
-    bi.bV5RedMask     = 0x00FF0000;
-    bi.bV5GreenMask   = 0x0000FF00;
-    bi.bV5BlueMask    = 0x000000FF;
-    bi.bV5AlphaMask   = 0xFF000000;
+    BITMAPINFO bmi;
+    memset(&bmi, 0, sizeof bmi);
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = w;
+    bmi.bmiHeader.biHeight      = -h;          /* top-down */
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
 
     HDC hdc = GetDC(NULL);
     unsigned char *bits = NULL;
-    HBITMAP hbmp = CreateDIBSection(hdc, (BITMAPINFO *)&bi,
+    HBITMAP hbmp = CreateDIBSection(hdc, &bmi,
                                     DIB_RGB_COLORS, (void **)&bits,
                                     NULL, 0);
     ReleaseDC(NULL, hdc);
@@ -268,10 +264,11 @@ traycon *traycon_create(const unsigned char *rgba, int width, int height,
     tray->cb       = cb;
     tray->userdata = userdata;
 
-    /* Message-only window */
+    /* Hidden window – avoid HWND_MESSAGE: XP's shell may not
+       properly update tray icons tied to message-only windows. */
     tray->hwnd = CreateWindowExW(0, CLASS_NAME, L"traycon", 0,
                                   0, 0, 0, 0,
-                                  HWND_MESSAGE, NULL, hinst, tray);
+                                  NULL, NULL, hinst, tray);
     if (!tray->hwnd) { free(tray); return NULL; }
 
     /* Icon */
@@ -322,7 +319,7 @@ int traycon_step(traycon *tray)
 {
     if (!tray) return -1;
     MSG msg;
-    while (PeekMessageW(&msg, tray->hwnd, 0, 0, PM_REMOVE)) {
+    while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

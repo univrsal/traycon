@@ -14,6 +14,10 @@ On Linux and BSD both backends are compiled in by default. At runtime the librar
 on KDE Plasma, GNOME with AppIndicator, etc.) and falls back to the X11
 system tray if no StatusNotifierWatcher is available.
 
+If you do not want to link against extra dependencies (x11 and dbus) you can
+include the traycon_dl.h shim before traycon.h and it'll try to dynamically
+load them at runtime and gracefully fail if they cannot be found.
+
 You can override this with `traycon_set_preferred_backend()` or at compile
 time with `-DTRAYCON_NO_SNI` / `-DTRAYCON_NO_X11`.
 
