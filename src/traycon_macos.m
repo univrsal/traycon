@@ -163,6 +163,7 @@ static NSImage *image_from_rgba(const unsigned char *rgba, int w, int h)
                             hasAlpha:YES
                             isPlanar:NO
                       colorSpaceName:NSDeviceRGBColorSpace
+                        bitmapFormat:NSBitmapFormatAlphaNonpremultiplied
                          bytesPerRow:w * 4
                         bitsPerPixel:32];
     if (!rep) return nil;
@@ -254,17 +255,24 @@ int traycon_step(traycon *tray)
     return 0;
 }
 
+static int traycon__have_bundle(void)
+{
+    return [[NSBundle mainBundle] bundleIdentifier] != nil;
+}
+
 void traycon_destroy(traycon *tray)
 {
     if (!tray) return;
     /* Remove notification delegate */
     if (@available(macOS 10.14, *)) {
-        UNUserNotificationCenter *center =
-            [UNUserNotificationCenter currentNotificationCenter];
-        if (center.delegate == (id)tray->handler)
-            center.delegate = nil;
-        [center removeDeliveredNotificationsWithIdentifiers:
-            @[@"traycon_notification"]];
+        if (traycon__have_bundle()) {
+            UNUserNotificationCenter *center =
+                [UNUserNotificationCenter currentNotificationCenter];
+            if (center.delegate == (id)tray->handler)
+                center.delegate = nil;
+            [center removeDeliveredNotificationsWithIdentifiers:
+                @[@"traycon_notification"]];
+        }
     }
     if (tray->item)
         [[NSStatusBar systemStatusBar] removeStatusItem:tray->item];
@@ -328,6 +336,7 @@ int traycon_notify(traycon *tray, const char *title, const char *body,
                    traycon_notification_cb cb, void *userdata)
 {
     if (!tray || !title) return -1;
+    if (!traycon__have_bundle()) return -1;
 
     if (@available(macOS 10.14, *)) {
         UNUserNotificationCenter *center =
@@ -419,7 +428,7 @@ int traycon_notify(traycon *tray, const char *title, const char *body,
 
 int traycon_dismiss_notification(traycon *tray)
 {
-    if (!tray) return -1;
+    if (!tray || !traycon__have_bundle()) return -1;
 
     if (@available(macOS 10.14, *)) {
         [[UNUserNotificationCenter currentNotificationCenter]
